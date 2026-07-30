@@ -1,16 +1,26 @@
 {
-  "functions": [{ "source": "functions", "codebase": "default" }],
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
   "hosting": {
     "public": ".",
     "ignore": [
       "firebase.json",
-      "README.md",
-      "package.json",
-      "functions/**",
-      ".gitignore",
       "**/.*",
-      "**/node_modules/**"
+      "**/node_modules/**",
+      "functions/**"
     ],
-    "rewrites": [{ "source": "**", "destination": "/index.html" }]
+    "headers": [
+      {
+        "source": "**/*.@(js|css)",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
+      }
+    ]
   }
 }

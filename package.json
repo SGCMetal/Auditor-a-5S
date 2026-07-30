@@ -1,8 +1,8 @@
 {
   "name": "mps-auditoria-5s",
   "private": true,
-  "version": "0.1.0",
-  "description": "PWA de auditorías 5S para Metal Plating y Servicios",
+  "version": "0.2.0",
+  "description": "PWA de auditorías 5S MPS con sincronización en Firebase",
   "scripts": {
     "serve": "python3 -m http.server 8080"
   }

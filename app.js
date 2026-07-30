@@ -207,18 +207,30 @@ const QUESTIONS = [
   }
 ];
 
+
 const state = {
   view: "home",
   auditor: localStorage.getItem("mps-5s-auditor") || "",
   audits: [],
   draft: null,
+  pendingDraft: null,
   summary: false,
+  currentPlan: null,
   selectedAudit: null,
-  loading: true
+  loading: true,
+  authReady: false,
+  user: null,
+  cloudConfigured: false,
+  cloudEnabled: false,
+  cloudStatus: "local",
+  loginError: ""
 };
 
 const app = document.getElementById("app");
 let dbPromise;
+let cloudAuth = null;
+let cloudDb = null;
+let unsubscribeAudits = null;
 
 function uid() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
@@ -288,6 +300,111 @@ async function idbDelete(storeName, key) {
   });
 }
 
+function firebaseConfigReady() {
+  const cfg = window.MPS_CONFIG?.FIREBASE || {};
+  return Boolean(cfg.apiKey && cfg.authDomain && cfg.projectId && cfg.appId);
+}
+
+async function initCloud() {
+  state.cloudConfigured = firebaseConfigReady();
+  if (!state.cloudConfigured || !window.firebase) {
+    state.authReady = true;
+    state.cloudStatus = "local";
+    return;
+  }
+
+  try {
+    if (!firebase.apps.length) firebase.initializeApp(window.MPS_CONFIG.FIREBASE);
+    cloudAuth = firebase.auth();
+    cloudDb = firebase.firestore();
+    state.cloudEnabled = true;
+    state.cloudStatus = navigator.onLine ? "connecting" : "offline";
+
+    try {
+      await cloudDb.enablePersistence({ synchronizeTabs: true });
+    } catch (error) {
+      if (!['failed-precondition', 'unimplemented'].includes(error.code)) console.warn("Persistencia Firebase:", error);
+    }
+
+    await new Promise((resolve) => {
+      let first = true;
+      cloudAuth.onAuthStateChanged(async (user) => {
+        state.user = user || null;
+        state.authReady = true;
+        state.loginError = "";
+        if (unsubscribeAudits) {
+          unsubscribeAudits();
+          unsubscribeAudits = null;
+        }
+        if (user) {
+          if (!state.auditor) {
+            state.auditor = user.email?.split("@")[0]?.replace(/[._-]+/g, " ") || "Auditor";
+            localStorage.setItem("mps-5s-auditor", state.auditor);
+          }
+          startCloudListener();
+        } else {
+          state.cloudStatus = "signed-out";
+        }
+        if (first) { first = false; resolve(); }
+        render();
+      });
+    });
+  } catch (error) {
+    console.error("No fue posible iniciar Firebase", error);
+    state.authReady = true;
+    state.cloudEnabled = false;
+    state.cloudStatus = "error";
+  }
+}
+
+function preserveLocalPhotos(cloudAudit, localAudit) {
+  if (!localAudit) return cloudAudit;
+  const localAnswers = new Map((localAudit.answers || []).map((answer) => [answer.questionId, answer]));
+  return {
+    ...cloudAudit,
+    answers: (cloudAudit.answers || []).map((answer) => {
+      const local = localAnswers.get(answer.questionId);
+      const photos = (answer.photos || []).map((photo) => {
+        const match = local?.photos?.find((item) => item.id === photo.id && item.dataUrl);
+        return match ? { ...photo, dataUrl: match.dataUrl } : photo;
+      });
+      return { ...answer, photos };
+    })
+  };
+}
+
+function startCloudListener() {
+  if (!cloudDb || !state.user) return;
+  state.cloudStatus = navigator.onLine ? "connecting" : "offline";
+  unsubscribeAudits = cloudDb.collection("audits").orderBy("completedAt", "desc").onSnapshot(
+    { includeMetadataChanges: true },
+    (snapshot) => {
+      const existing = new Map(state.audits.map((audit) => [audit.id, audit]));
+      const cloudAudits = snapshot.docs.map((doc) => {
+        const data = doc.data();
+        const normalized = {
+          id: doc.id,
+          ...data,
+          syncedAt: data.syncedAt?.toDate ? data.syncedAt.toDate().toISOString() : (data.syncedAt || null),
+          syncStatus: doc.metadata.hasPendingWrites ? "pending" : "synced"
+        };
+        return preserveLocalPhotos(normalized, existing.get(doc.id));
+      });
+      const cloudIds = new Set(cloudAudits.map((audit) => audit.id));
+      const onlyLocal = state.audits.filter((audit) => !cloudIds.has(audit.id) && audit.syncStatus !== "synced");
+      state.audits = [...cloudAudits, ...onlyLocal].sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
+      state.cloudStatus = !navigator.onLine ? "offline" : snapshot.metadata.fromCache ? "cached" : "synced";
+      render();
+    },
+    (error) => {
+      console.error("Sincronización Firestore", error);
+      state.cloudStatus = "error";
+      render();
+    }
+  );
+  syncPendingAudits().catch(console.error);
+}
+
 function emptyAnswers() {
   return QUESTIONS.map((question) => ({ questionId: question.id, score: null, observation: "", photos: [] }));
 }
@@ -326,11 +443,25 @@ function buildPlan(answers, aiSuggestions = []) {
   }).sort((a, b) => a.score - b.score || a.questionId - b.questionId);
 }
 
+function cloudLabel() {
+  const labels = {
+    synced: ["☁", "Sincronizado"],
+    connecting: ["◌", "Conectando"],
+    cached: ["☁", "Datos en caché"],
+    offline: ["↻", "Sin conexión"],
+    error: ["!", "Error de nube"],
+    local: ["⌂", "Modo local"],
+    "signed-out": ["○", "Sin sesión"]
+  };
+  return labels[state.cloudStatus] || labels.local;
+}
+
 function header(title, subtitle = "", back = false) {
+  const [icon, label] = cloudLabel();
   return `<header class="topbar"><div class="topbar-inner ${back ? "has-back" : "has-brand"}">
     ${back ? `<button class="icon-button" data-action="back" aria-label="Regresar">←</button>` : `<div class="brand-mark"><img src="./logo-mps-header.png" alt="Metal Plating y Servicios"></div>`}
     <div class="topbar-copy"><strong>${escapeHtml(title)}</strong>${subtitle ? `<span>${escapeHtml(subtitle)}</span>` : ""}</div>
-    <div class="topbar-action" aria-hidden="true">✓</div>
+    ${state.user ? `<button class="topbar-action cloud-action" data-action="logout" title="${escapeHtml(label)} · Cerrar sesión"><b>${icon}</b></button>` : `<div class="topbar-action" title="${escapeHtml(label)}">${icon}</div>`}
   </div></header>`;
 }
 
@@ -342,8 +473,28 @@ function bottomNav() {
   </nav>`;
 }
 
+function renderLogin() {
+  app.innerHTML = `<main class="login-page">
+    <section class="login-card">
+      <img class="login-logo" src="./logo-mps-full.png" alt="Metal Plating y Servicios">
+      <p class="eyebrow">Acceso interno</p>
+      <h1>Auditoría 5S MPS</h1>
+      <p>Ingresa con una cuenta autorizada para registrar auditorías y consultar los resultados desde cualquier dispositivo.</p>
+      <form id="loginForm" class="login-form">
+        <label class="field-label" for="loginEmail">Correo</label>
+        <input id="loginEmail" class="text-input" type="email" autocomplete="username" required placeholder="usuario@metalplating.mx">
+        <label class="field-label" for="loginPassword">Contraseña</label>
+        <input id="loginPassword" class="text-input" type="password" autocomplete="current-password" required placeholder="Contraseña">
+        <button class="primary-button" type="submit">Entrar</button>
+      </form>
+      ${state.loginError ? `<div class="error-message">${escapeHtml(state.loginError)}</div>` : ""}
+      <p class="login-note">Las cuentas se crean en Firebase; la app no permite registro público.</p>
+    </section>
+  </main>`;
+  document.getElementById("loginForm").addEventListener("submit", handleLogin);
+}
+
 function renderHome() {
-  const draftSetting = state.pendingDraft;
   const cards = AREAS.map((area) => {
     const latest = state.audits.find((audit) => audit.area.id === area.id);
     return `<button class="area-card" data-area="${area.id}" ${state.auditor.trim() ? "" : "disabled"}>
@@ -351,13 +502,15 @@ function renderHome() {
       <span>${latest ? `Último resultado: ${latest.result}%` : "Sin auditorías"}</span><i>›</i>
     </button>`;
   }).join("");
+  const [cloudIcon, cloudText] = cloudLabel();
 
   app.innerHTML = `${header("Auditoría 5S MPS", "Recorrido semanal con criterios claros")}
     <main class="page page-with-nav">
       <section class="welcome-card"><div class="welcome-icon">✦</div><div><p class="eyebrow">Bienvenido</p><h1>Comencemos el recorrido</h1><p>Selecciona el área. La app te guiará pregunta por pregunta y al final preparará la retroalimentación.</p></div></section>
+      <section class="sync-card ${state.cloudStatus}"><b>${cloudIcon}</b><div><strong>${escapeHtml(cloudText)}</strong><span>${state.cloudEnabled ? `Sesión: ${escapeHtml(state.user?.email || "cuenta autorizada")}` : "Configura Firebase para compartir resultados entre dispositivos."}</span></div></section>
       <label class="field-label" for="auditor">Nombre del auditor</label>
-      <input id="auditor" class="text-input" value="${escapeHtml(state.auditor)}" placeholder="Ej. Pablo Gallardo">
-      ${draftSetting ? `<button class="resume-card" data-action="resume"><div><strong>Continuar auditoría pendiente</strong><span>${escapeHtml(draftSetting.value.area.full)} · Pregunta ${draftSetting.value.index + 1} de 10</span></div><b>›</b></button>` : ""}
+      <input id="auditor" class="text-input" value="${escapeHtml(state.auditor)}" placeholder="Ej. Nombre de la auditora">
+      ${state.pendingDraft ? `<button class="resume-card" data-action="resume"><div><strong>Continuar auditoría pendiente</strong><span>${escapeHtml(state.pendingDraft.value.area.full)} · Pregunta ${state.pendingDraft.value.index + 1} de 10</span></div><b>›</b></button>` : ""}
       <div class="section-heading"><div><p class="eyebrow">11 áreas configuradas</p><h2>¿Qué área vas a auditar?</h2></div></div>
       <div class="area-grid">${cards}</div>
       ${state.auditor.trim() ? "" : `<p class="helper-message">Escribe el nombre del auditor para habilitar las áreas.</p>`}
@@ -396,23 +549,20 @@ function renderWizard() {
       <div class="sticky-actions"><button class="secondary-button" data-action="save-exit">Guardar y salir</button><button class="primary-button" data-action="next" ${answer.score ? "" : "disabled"}>${draft.index === QUESTIONS.length - 1 ? "Ver resultado" : "Siguiente"}<b>›</b></button></div>
     </main>`;
 
-  document.getElementById("observation").addEventListener("input", (event) => {
+  const observation = document.getElementById("observation");
+  observation.addEventListener("input", async (event) => {
     answer.observation = event.target.value;
     document.getElementById("charCount").textContent = answer.observation.length;
-    saveCurrentDraft();
+    await saveCurrentDraft();
   });
-  const input = document.getElementById("photoInput");
-  input.addEventListener("change", async (event) => {
-    await addPhotos(event.target.files);
-  });
+  document.getElementById("photoInput").addEventListener("change", (event) => addPhotos(event.target.files));
 }
 
 function renderSummary() {
   const result = calculateResult(state.draft.answers);
   const level = resultLevel(result);
-  if (!state.currentPlan) state.currentPlan = buildPlan(state.draft.answers);
+  const estimated = Math.min(100, result + state.currentPlan.filter((item) => item.score < 5).length * 2);
   const opportunities = state.currentPlan.filter((item) => item.score < 5);
-  const estimated = Math.min(100, result + opportunities.reduce((sum, item) => sum + item.possibleGain, 0));
   const cards = state.currentPlan.map((item) => `<article class="plan-card priority-${item.priority.toLowerCase()}">
     <div class="plan-card-top"><div><span class="question-chip">Pregunta ${item.questionId}</span><h3>${escapeHtml(item.title)}</h3></div><div class="mini-score">${item.score}/5</div></div>
     <p class="finding"><strong>Lo observado:</strong> ${escapeHtml(item.finding)}</p>
@@ -429,24 +579,32 @@ function renderSummary() {
       <div id="aiMessage"></div>
       <div class="section-heading"><div><p class="eyebrow">Retroalimentación automática</p><h2>Plan de mejora 5S</h2></div><span class="count-pill">${opportunities.length} oportunidades</span></div>
       <div class="plan-list">${cards}</div>
-      <div class="sticky-actions"><button class="secondary-button" data-action="review">Revisar respuestas</button><button class="primary-button" data-action="save-audit">Guardar auditoría<b>✓</b></button></div>
+      <div class="sticky-actions"><button class="secondary-button" data-action="review">Revisar respuestas</button><button class="primary-button" data-action="save-audit">Guardar y sincronizar<b>✓</b></button></div>
     </main>`;
 }
 
 function renderHistory() {
   const rows = state.audits.map((audit) => {
     const level = resultLevel(audit.result);
-    return `<button class="audit-list-card" data-audit="${audit.id}"><div class="audit-list-icon">▥</div><div><strong>${escapeHtml(audit.area.short)}</strong><span>${formatDate(audit.createdAt)} · ${escapeHtml(audit.auditor)}</span><small>${audit.plan.filter((item) => item.score < 5).length} recomendaciones</small></div><div class="audit-result ${level.tone}"><strong>${audit.result}%</strong><b>›</b></div></button>`;
+    const sync = audit.syncStatus === "pending" ? " · Pendiente de nube" : audit.syncStatus === "local" ? " · Solo local" : "";
+    return `<button class="audit-list-card" data-audit="${audit.id}"><div class="audit-list-icon">▥</div><div><strong>${escapeHtml(audit.area.short)}</strong><span>${formatDate(audit.completedAt || audit.createdAt)} · ${escapeHtml(audit.auditor)}</span><small>${audit.plan.filter((item) => item.score < 5).length} recomendaciones${sync}</small></div><div class="audit-result ${level.tone}"><strong>${audit.result}%</strong><b>›</b></div></button>`;
   }).join("");
-  app.innerHTML = `${header("Historial de auditorías", `${state.audits.length} registros guardados`)}
-    <main class="page page-with-nav"><div class="history-actions"><div><p class="eyebrow">Consulta y seguimiento</p><h1>Resultados por área</h1></div><button class="export-button" data-action="export" ${state.audits.length ? "" : "disabled"}>▣ Excel</button></div>
-    ${state.audits.length ? `<div class="audit-list">${rows}</div>` : `<section class="empty-state"><b>◷</b><h2>Aún no hay auditorías</h2><p>Cuando completes la primera, aquí aparecerán el resultado, las evidencias y el plan de mejora.</p></section>`}</main>${bottomNav()}`;
+  app.innerHTML = `${header("Historial 5S", "Información compartida entre dispositivos")}<main class="page page-with-nav"><div class="history-actions"><div><p class="eyebrow">Consulta y seguimiento</p><h1>Resultados por área</h1></div><button class="export-button" data-action="export" ${state.audits.length ? "" : "disabled"}>▣ Excel</button></div>
+    ${state.audits.length ? `<div class="audit-list">${rows}</div>` : `<section class="empty-state"><b>◷</b><h2>Aún no hay auditorías</h2><p>Cuando se complete la primera, aquí aparecerán el resultado, las evidencias y el plan de mejora.</p></section>`}</main>${bottomNav()}`;
 }
 
 function renderDetail() {
   const audit = state.selectedAudit;
   const cards = audit.plan.map((item) => `<article class="plan-card"><div class="plan-card-top"><div><span class="question-chip">Pregunta ${item.questionId}</span><h3>${escapeHtml(item.title)}</h3></div><div class="mini-score">${item.score}/5</div></div><p class="finding">${escapeHtml(item.finding)}</p><ul>${item.actions.map((action) => `<li>${escapeHtml(action)}</li>`).join("")}</ul></article>`).join("");
-  app.innerHTML = `${header("Detalle de auditoría", audit.area.short, true)}<main class="page detail-page"><section class="detail-header"><div><p class="eyebrow">Resultado semanal</p><h1>${audit.result}%</h1><p>${escapeHtml(audit.area.full)}</p></div><div class="detail-meta"><span>Auditor</span><strong>${escapeHtml(audit.auditor)}</strong><span>Fecha</span><strong>${formatDate(audit.createdAt)}</strong></div></section><div class="section-heading"><div><p class="eyebrow">Retroalimentación</p><h2>Recomendaciones registradas</h2></div></div><div class="plan-list">${cards}</div></main>`;
+  const evidenceAnswers = (audit.answers || []).filter((answer) => answer.photos?.length);
+  const evidence = evidenceAnswers.map((answer) => {
+    const q = QUESTIONS.find((item) => item.id === answer.questionId);
+    const photos = answer.photos.map((photo) => photo.dataUrl ? `<img src="${photo.dataUrl}" alt="Evidencia de ${escapeHtml(q.title)}">` : `<div class="evidence-placeholder">Cargando evidencia…</div>`).join("");
+    return `<article class="evidence-card"><div><span class="question-chip">Pregunta ${q.id}</span><h3>${escapeHtml(q.title)}</h3><p>${escapeHtml(answer.observation || "Sin observación escrita")}</p></div><div class="evidence-grid">${photos}</div></article>`;
+  }).join("");
+  app.innerHTML = `${header("Detalle de auditoría", audit.area.short, true)}<main class="page detail-page"><section class="detail-header"><div><p class="eyebrow">Resultado semanal</p><h1>${audit.result}%</h1><p>${escapeHtml(audit.area.full)}</p></div><div class="detail-meta"><span>Auditor</span><strong>${escapeHtml(audit.auditor)}</strong><span>Fecha</span><strong>${formatDate(audit.completedAt || audit.createdAt)}</strong></div></section>
+    ${evidenceAnswers.length ? `<div class="section-heading"><div><p class="eyebrow">Evidencia</p><h2>Fotografías registradas</h2></div></div><div class="evidence-list">${evidence}</div>` : ""}
+    <div class="section-heading"><div><p class="eyebrow">Retroalimentación</p><h2>Recomendaciones registradas</h2></div></div><div class="plan-list">${cards}</div></main>`;
 }
 
 function renderDashboard() {
@@ -461,13 +619,30 @@ function renderDashboard() {
 }
 
 function render() {
-  if (state.loading) return;
+  if (state.loading || !state.authReady) return;
+  if (state.cloudConfigured && !state.user) return renderLogin();
   if (state.selectedAudit) return renderDetail();
   if (state.draft && state.summary) return renderSummary();
   if (state.draft) return renderWizard();
   if (state.view === "history") return renderHistory();
   if (state.view === "dashboard") return renderDashboard();
   return renderHome();
+}
+
+async function handleLogin(event) {
+  event.preventDefault();
+  state.loginError = "";
+  const email = document.getElementById("loginEmail").value.trim();
+  const password = document.getElementById("loginPassword").value;
+  const button = event.submitter || event.currentTarget.querySelector("button[type='submit']");
+  if (button) { button.disabled = true; button.textContent = "Ingresando…"; }
+  try {
+    await cloudAuth.signInWithEmailAndPassword(email, password);
+  } catch (error) {
+    console.error(error);
+    state.loginError = "No fue posible iniciar sesión. Revisa el correo, la contraseña y que la cuenta esté habilitada.";
+    renderLogin();
+  }
 }
 
 async function saveCurrentDraft() {
@@ -483,19 +658,37 @@ async function startAudit(areaId) {
   render();
 }
 
-async function resizeImage(file) {
+async function fileToImage(file) {
   const dataUrl = await new Promise((resolve, reject) => {
-    const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file);
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
   });
-  const image = await new Promise((resolve, reject) => {
-    const img = new Image(); img.onload = () => resolve(img); img.onerror = reject; img.src = dataUrl;
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = dataUrl;
   });
-  const maxSize = 720;
+}
+
+async function resizeImage(file) {
+  const image = await fileToImage(file);
+  const maxSize = 640;
   const scale = Math.min(1, maxSize / Math.max(image.width, image.height));
   const canvas = document.createElement("canvas");
-  canvas.width = Math.round(image.width * scale); canvas.height = Math.round(image.height * scale);
+  canvas.width = Math.max(1, Math.round(image.width * scale));
+  canvas.height = Math.max(1, Math.round(image.height * scale));
   canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL("image/jpeg", 0.58);
+  let quality = 0.52;
+  let output = canvas.toDataURL("image/jpeg", quality);
+  while (output.length > 700000 && quality > 0.24) {
+    quality -= 0.07;
+    output = canvas.toDataURL("image/jpeg", quality);
+  }
+  if (output.length > 900000) throw new Error("La fotografía continúa siendo demasiado pesada. Intenta tomarla nuevamente.");
+  return output;
 }
 
 async function addPhotos(fileList) {
@@ -505,9 +698,7 @@ async function addPhotos(fileList) {
   if (!files.length) return;
   app.classList.add("busy");
   try {
-    for (const file of files) {
-      answer.photos.push({ id: uid(), name: file.name, dataUrl: await resizeImage(file), createdAt: new Date().toISOString() });
-    }
+    for (const file of files) answer.photos.push({ id: uid(), name: file.name || "evidencia.jpg", dataUrl: await resizeImage(file), createdAt: new Date().toISOString() });
     await saveCurrentDraft();
   } catch (error) {
     alert(`No fue posible procesar la fotografía: ${error.message}`);
@@ -521,11 +712,12 @@ async function analyzeWithAI() {
   const message = document.getElementById("aiMessage");
   const endpoint = window.MPS_CONFIG?.AI_ENDPOINT?.trim();
   if (!endpoint) {
-    message.innerHTML = `<div class="info-message">La primera versión ya generó el plan con la calificación, los criterios y las observaciones. El análisis visual se activará cuando conectemos la función segura de inteligencia artificial.</div>`;
+    message.innerHTML = `<div class="info-message">El plan ya se generó con las calificaciones, criterios y observaciones. El análisis visual se activará al conectar una función segura de inteligencia artificial.</div>`;
     return;
   }
   const button = document.querySelector('[data-action="analyze-ai"]');
-  button.disabled = true; button.innerHTML = `<span class="loader light"></span><span>Analizando evidencias…</span>`;
+  button.disabled = true;
+  button.innerHTML = `<span class="loader light"></span><span>Analizando evidencias…</span>`;
   try {
     const answers = state.draft.answers.filter((answer) => answer.photos.length || answer.observation).map((answer) => {
       const q = QUESTIONS.find((item) => item.id === answer.questionId);
@@ -539,27 +731,145 @@ async function analyzeWithAI() {
     document.getElementById("aiMessage").innerHTML = `<div class="success-message">Las fotografías fueron analizadas y el plan de mejora se actualizó.</div>`;
   } catch (error) {
     message.innerHTML = `<div class="error-message">No fue posible analizar las imágenes: ${escapeHtml(error.message)}.</div>`;
-    button.disabled = false; button.innerHTML = `<b>✦</b><span>Analizar fotos y mejorar recomendaciones</span>`;
+    button.disabled = false;
+    button.innerHTML = `<b>✦</b><span>Analizar fotos y mejorar recomendaciones</span>`;
   }
+}
+
+function auditForCloud(audit) {
+  return {
+    ...audit,
+    answers: audit.answers.map((answer) => ({
+      ...answer,
+      photos: (answer.photos || []).map(({ id, name, createdAt }) => ({ id, name, createdAt }))
+    })),
+    createdBy: state.user.uid,
+    createdByEmail: state.user.email || "",
+    syncedAt: firebase.firestore.FieldValue.serverTimestamp()
+  };
+}
+
+function withTimeout(promise, milliseconds, message = "Tiempo de espera agotado") {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), milliseconds);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
+async function syncPendingAudits() {
+  if (!cloudDb || !state.user || !navigator.onLine) return;
+  const pending = state.audits.filter((audit) => audit.syncStatus === "pending");
+  for (const audit of pending) {
+    try {
+      await withTimeout(saveAuditToCloud(audit), 15000, "No se confirmó la conexión con Firebase");
+      audit.syncStatus = "synced";
+      await idbPut("audits", audit);
+    } catch (error) {
+      console.warn(`Auditoría ${audit.id} pendiente de sincronización`, error);
+      state.cloudStatus = "offline";
+      break;
+    }
+  }
+}
+
+async function saveAuditToCloud(audit) {
+  if (!cloudDb || !state.user) return false;
+  const batch = cloudDb.batch();
+  const auditRef = cloudDb.collection("audits").doc(audit.id);
+  batch.set(auditRef, auditForCloud(audit), { merge: true });
+  for (const answer of audit.answers) {
+    for (const photo of answer.photos || []) {
+      const photoRef = auditRef.collection("photos").doc(photo.id);
+      batch.set(photoRef, {
+        id: photo.id,
+        questionId: answer.questionId,
+        name: photo.name || "evidencia.jpg",
+        createdAt: photo.createdAt || new Date().toISOString(),
+        dataUrl: photo.dataUrl,
+        createdBy: state.user.uid
+      }, { merge: true });
+    }
+  }
+  await batch.commit();
+  return true;
 }
 
 async function saveAudit() {
   const result = calculateResult(state.draft.answers);
-  const audit = { ...state.draft, result, plan: state.currentPlan || buildPlan(state.draft.answers), completedAt: new Date().toISOString() };
+  const audit = { ...state.draft, result, plan: state.currentPlan || buildPlan(state.draft.answers), completedAt: new Date().toISOString(), syncStatus: state.cloudEnabled ? "pending" : "local" };
   delete audit.index;
   await idbPut("audits", audit);
   await idbDelete("settings", "draft");
   state.audits = [audit, ...state.audits.filter((item) => item.id !== audit.id)];
+
+  if (state.cloudEnabled && state.user) {
+    state.cloudStatus = navigator.onLine ? "connecting" : "offline";
+    if (navigator.onLine) {
+      try {
+        await withTimeout(saveAuditToCloud(audit), 15000, "No se confirmó la conexión con Firebase");
+        audit.syncStatus = "synced";
+        await idbPut("audits", audit);
+        state.cloudStatus = "synced";
+      } catch (error) {
+        console.error("Guardado en nube", error);
+        audit.syncStatus = "pending";
+        await idbPut("audits", audit);
+        alert("La auditoría quedó guardada en este dispositivo, pero no se confirmó la sincronización. Se volverá a intentar al recuperar conexión.");
+      }
+    } else {
+      audit.syncStatus = "pending";
+      await idbPut("audits", audit);
+    }
+  }
+
   state.selectedAudit = audit;
-  state.draft = null; state.summary = false; state.currentPlan = null; state.view = "history"; state.pendingDraft = null;
+  state.draft = null;
+  state.summary = false;
+  state.currentPlan = null;
+  state.view = "history";
+  state.pendingDraft = null;
+  render();
+}
+
+async function loadCloudPhotos(audit) {
+  if (!cloudDb || !state.user) return audit;
+  const missing = (audit.answers || []).some((answer) => (answer.photos || []).some((photo) => !photo.dataUrl));
+  if (!missing) return audit;
+  try {
+    const snapshot = await cloudDb.collection("audits").doc(audit.id).collection("photos").get();
+    const photos = snapshot.docs.map((doc) => doc.data());
+    const hydrated = {
+      ...audit,
+      answers: audit.answers.map((answer) => ({
+        ...answer,
+        photos: (answer.photos || []).map((photo) => ({ ...photo, ...photos.find((item) => item.id === photo.id) }))
+      }))
+    };
+    await idbPut("audits", hydrated);
+    state.audits = state.audits.map((item) => item.id === hydrated.id ? hydrated : item);
+    return hydrated;
+  } catch (error) {
+    console.error("Carga de evidencias", error);
+    return audit;
+  }
+}
+
+async function selectAudit(id) {
+  const audit = state.audits.find((item) => item.id === id);
+  if (!audit) return;
+  state.selectedAudit = audit;
+  render();
+  state.selectedAudit = await loadCloudPhotos(audit);
   render();
 }
 
 function formatDate(value) {
-  return new Intl.DateTimeFormat("es-MX", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  if (!value) return "Fecha no disponible";
+  const date = value?.toDate ? value.toDate() : new Date(value);
+  return new Intl.DateTimeFormat("es-MX", { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
 
-// Minimal XLSX generator: crea un archivo .xlsx real sin dependencias externas.
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
   for (let n = 0; n < 256; n++) {
@@ -570,12 +880,7 @@ const CRC_TABLE = (() => {
   return table;
 })();
 
-function crc32(bytes) {
-  let crc = 0xffffffff;
-  for (const byte of bytes) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
+function crc32(bytes) { let crc = 0xffffffff; for (const byte of bytes) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8); return (crc ^ 0xffffffff) >>> 0; }
 function u16(value) { return [value & 255, (value >>> 8) & 255]; }
 function u32(value) { return [value & 255, (value >>> 8) & 255, (value >>> 16) & 255, (value >>> 24) & 255]; }
 function bytesFrom(text) { return new TextEncoder().encode(text); }
@@ -584,32 +889,24 @@ function makeZip(files) {
   const chunks = []; const central = []; let offset = 0;
   for (const file of files) {
     const name = bytesFrom(file.name); const data = bytesFrom(file.content); const crc = crc32(data);
-    const local = new Uint8Array([80,75,3,4, 20,0, 0,0, 0,0, 0,0, 0,0, ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), 0,0]);
+    const local = new Uint8Array([80,75,3,4,20,0,0,0,0,0,0,0,0,0,...u32(crc),...u32(data.length),...u32(data.length),...u16(name.length),0,0]);
     chunks.push(local, name, data);
-    const centralHeader = new Uint8Array([80,75,1,2, 20,0, 20,0, 0,0, 0,0, 0,0, 0,0, ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), 0,0, 0,0, 0,0, 0,0, 0,0, 0,0, ...u32(offset)]);
+    const centralHeader = new Uint8Array([80,75,1,2,20,0,20,0,0,0,0,0,0,0,0,0,...u32(crc),...u32(data.length),...u32(data.length),...u16(name.length),0,0,0,0,0,0,0,0,0,0,0,0,...u32(offset)]);
     central.push(centralHeader, name);
     offset += local.length + name.length + data.length;
   }
   const centralSize = central.reduce((sum, chunk) => sum + chunk.length, 0);
-  const end = new Uint8Array([80,75,5,6, 0,0, 0,0, ...u16(files.length), ...u16(files.length), ...u32(centralSize), ...u32(offset), 0,0]);
+  const end = new Uint8Array([80,75,5,6,0,0,0,0,...u16(files.length),...u16(files.length),...u32(centralSize),...u32(offset),0,0]);
   return new Blob([...chunks, ...central, end], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 }
 
-function xmlEscape(value) {
-  return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
-}
-
-function columnName(index) {
-  let name = ""; let n = index + 1;
-  while (n) { const r = (n - 1) % 26; name = String.fromCharCode(65 + r) + name; n = Math.floor((n - 1) / 26); }
-  return name;
-}
+function xmlEscape(value) { return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;"); }
+function columnName(index) { let name = ""; let n = index + 1; while (n) { const r = (n - 1) % 26; name = String.fromCharCode(65 + r) + name; n = Math.floor((n - 1) / 26); } return name; }
 
 function sheetXml(rows) {
   const all = rows.length ? rows : [{ Mensaje: "Sin datos" }];
   const headers = Object.keys(all[0]);
-  const rowXml = [];
-  rowXml.push(`<row r="1">${headers.map((h, i) => `<c r="${columnName(i)}1" t="inlineStr" s="1"><is><t>${xmlEscape(h)}</t></is></c>`).join("")}</row>`);
+  const rowXml = [`<row r="1">${headers.map((h, i) => `<c r="${columnName(i)}1" t="inlineStr" s="1"><is><t>${xmlEscape(h)}</t></is></c>`).join("")}</row>`];
   all.forEach((row, rIndex) => {
     const r = rIndex + 2;
     rowXml.push(`<row r="${r}">${headers.map((h, cIndex) => {
@@ -621,18 +918,13 @@ function sheetXml(rows) {
 }
 
 function exportExcel() {
-  const summary = state.audits.map((audit) => ({ Folio: audit.id, Fecha: formatDate(audit.createdAt), Área: audit.area.full, Auditor: audit.auditor, Resultado: audit.result / 100, Meta: 0.8, Estado: audit.result >= 80 ? "Meta alcanzada" : "Requiere mejora", Recomendaciones: audit.plan.filter((item) => item.score < 5).length }));
+  const summary = state.audits.map((audit) => ({ Folio: audit.id, Fecha: formatDate(audit.completedAt || audit.createdAt), Área: audit.area.full, Auditor: audit.auditor, Resultado: audit.result / 100, Meta: 0.8, Estado: audit.result >= 80 ? "Meta alcanzada" : "Requiere mejora", Recomendaciones: audit.plan.filter((item) => item.score < 5).length }));
   const detail = state.audits.flatMap((audit) => audit.answers.map((answer) => {
     const q = QUESTIONS.find((item) => item.id === answer.questionId);
-    return { Folio: audit.id, Fecha: formatDate(audit.createdAt), Área: audit.area.full, Pregunta: `${q.id}. ${q.title}`, "Pregunta de auditoría": q.question, Calificación: Number(answer.score), "Criterio aplicado": q.criteria[answer.score], Observación: answer.observation || "", Evidencias: answer.photos.length };
+    return { Folio: audit.id, Fecha: formatDate(audit.completedAt || audit.createdAt), Área: audit.area.full, Pregunta: `${q.id}. ${q.title}`, "Pregunta de auditoría": q.question, Calificación: Number(answer.score), "Criterio aplicado": q.criteria[answer.score], Observación: answer.observation || "", Evidencias: answer.photos.length };
   }));
-  const plans = state.audits.flatMap((audit) => audit.plan.flatMap((item) => item.actions.map((action, index) => ({ Folio: audit.id, Fecha: formatDate(audit.createdAt), Área: audit.area.full, Pregunta: `${item.questionId}. ${item.title}`, Calificación: item.score, Prioridad: item.priority, Hallazgo: item.finding, "Recomendación No.": index + 1, "Recomendación de mejora": action, Objetivo: item.target, Fuente: item.source }))));
-
-  const sheets = [
-    { name: "Resumen semanal", rows: summary },
-    { name: "Detalle auditoría", rows: detail },
-    { name: "Plan de mejora 5S", rows: plans }
-  ];
+  const plans = state.audits.flatMap((audit) => audit.plan.flatMap((item) => item.actions.map((action, index) => ({ Folio: audit.id, Fecha: formatDate(audit.completedAt || audit.createdAt), Área: audit.area.full, Pregunta: `${item.questionId}. ${item.title}`, Calificación: item.score, Prioridad: item.priority, Hallazgo: item.finding, "Recomendación No.": index + 1, "Recomendación de mejora": action, Objetivo: item.target, Fuente: item.source }))));
+  const sheets = [{ name: "Resumen semanal", rows: summary }, { name: "Detalle auditoría", rows: detail }, { name: "Plan de mejora 5S", rows: plans }];
   const files = [
     { name: "[Content_Types].xml", content: `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i+1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("")}</Types>` },
     { name: "_rels/.rels", content: `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>` },
@@ -642,7 +934,10 @@ function exportExcel() {
   ];
   sheets.forEach((sheet, i) => files.push({ name: `xl/worksheets/sheet${i+1}.xml`, content: sheetXml(sheet.rows) }));
   const blob = makeZip(files);
-  const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `Auditorias_5S_MPS_${new Date().toISOString().slice(0,10)}.xlsx`; link.click();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `Auditorias_5S_MPS_${new Date().toISOString().slice(0,10)}.xlsx`;
+  link.click();
   setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 }
 
@@ -656,18 +951,21 @@ app.addEventListener("click", async (event) => {
   }
   const removePhoto = event.target.closest("[data-remove-photo]");
   if (removePhoto) {
-    const answer = state.draft.answers[state.draft.index]; answer.photos = answer.photos.filter((photo) => photo.id !== removePhoto.dataset.removePhoto);
+    const answer = state.draft.answers[state.draft.index];
+    answer.photos = answer.photos.filter((photo) => photo.id !== removePhoto.dataset.removePhoto);
     await saveCurrentDraft(); render(); return;
   }
   const auditButton = event.target.closest("[data-audit]");
-  if (auditButton) { state.selectedAudit = state.audits.find((item) => item.id === auditButton.dataset.audit); render(); return; }
+  if (auditButton) return selectAudit(auditButton.dataset.audit);
   const nav = event.target.closest("[data-view]");
-  if (nav) { state.view = nav.dataset.view; render(); return; }
+  if (nav) { state.view = nav.dataset.view; state.selectedAudit = null; render(); return; }
   const action = event.target.closest("[data-action]")?.dataset.action;
   if (!action) return;
+  if (action === "logout") { if (cloudAuth) await cloudAuth.signOut(); return; }
   if (action === "add-photo") return document.getElementById("photoInput").click();
   if (action === "next") {
-    const answer = state.draft.answers[state.draft.index]; if (!answer.score) return;
+    const answer = state.draft.answers[state.draft.index];
+    if (!answer.score) return;
     if (state.draft.index === QUESTIONS.length - 1) { state.summary = true; state.currentPlan = buildPlan(state.draft.answers); }
     else state.draft.index += 1;
     await saveCurrentDraft(); render(); return;
@@ -687,16 +985,27 @@ app.addEventListener("click", async (event) => {
   }
 });
 
+window.addEventListener("online", () => {
+  if (state.cloudEnabled && state.user) {
+    state.cloudStatus = "connecting";
+    syncPendingAudits().catch(console.error);
+  }
+  render();
+});
+window.addEventListener("offline", () => { if (state.cloudEnabled) state.cloudStatus = "offline"; render(); });
+
 async function init() {
   try {
     const audits = await idbGetAll("audits");
-    state.audits = audits.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    state.audits = audits.sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
     state.pendingDraft = await idbGet("settings", "draft");
   } catch (error) {
     console.error(error);
     alert("No fue posible abrir el almacenamiento local de la aplicación.");
   }
+  await initCloud();
   state.loading = false;
+  state.authReady = true;
   render();
   if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("./sw.js").catch(console.error);
 }
