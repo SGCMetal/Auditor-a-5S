@@ -1,7 +1,7 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Solo las cuentas creadas en Firebase Authentication pueden acceder.
+    // Solo sesiones autenticadas pueden acceder. En esta versión la app inicia sesión anónimamente de forma automática.
     match /audits/{auditId} {
       allow read: if request.auth != null;
       allow create: if request.auth != null

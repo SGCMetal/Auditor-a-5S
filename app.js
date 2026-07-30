@@ -223,7 +223,7 @@ const state = {
   cloudConfigured: false,
   cloudEnabled: false,
   cloudStatus: "local",
-  loginError: ""
+  authError: ""
 };
 
 const app = document.getElementById("app");
@@ -320,33 +320,62 @@ async function initCloud() {
     state.cloudEnabled = true;
     state.cloudStatus = navigator.onLine ? "connecting" : "offline";
 
+    // Mantiene el usuario anónimo del dispositivo entre aperturas del navegador.
+    await cloudAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
+
     try {
       await cloudDb.enablePersistence({ synchronizeTabs: true });
     } catch (error) {
-      if (!['failed-precondition', 'unimplemented'].includes(error.code)) console.warn("Persistencia Firebase:", error);
+      if (!["failed-precondition", "unimplemented"].includes(error.code)) console.warn("Persistencia Firebase:", error);
     }
 
     await new Promise((resolve) => {
-      let first = true;
+      let firstConnectionResolved = false;
+      let anonymousSignInPending = false;
+      const finishFirstConnection = () => {
+        if (!firstConnectionResolved) {
+          firstConnectionResolved = true;
+          resolve();
+        }
+      };
+
       cloudAuth.onAuthStateChanged(async (user) => {
-        state.user = user || null;
-        state.authReady = true;
-        state.loginError = "";
         if (unsubscribeAudits) {
           unsubscribeAudits();
           unsubscribeAudits = null;
         }
+
         if (user) {
-          if (!state.auditor) {
-            state.auditor = user.email?.split("@")[0]?.replace(/[._-]+/g, " ") || "Auditor";
-            localStorage.setItem("mps-5s-auditor", state.auditor);
-          }
+          state.user = user;
+          state.authReady = true;
+          state.cloudEnabled = true;
+          state.authError = "";
           startCloudListener();
-        } else {
-          state.cloudStatus = "signed-out";
+          finishFirstConnection();
+          render();
+          return;
         }
-        if (first) { first = false; resolve(); }
-        render();
+
+        state.user = null;
+        if (anonymousSignInPending) return;
+        anonymousSignInPending = true;
+        state.cloudStatus = navigator.onLine ? "connecting" : "offline";
+
+        try {
+          await cloudAuth.signInAnonymously();
+        } catch (error) {
+          console.error("No fue posible iniciar la sesión anónima", error);
+          state.authReady = true;
+          state.cloudEnabled = false;
+          state.cloudStatus = "auth-error";
+          state.authError = error.code === "auth/operation-not-allowed"
+            ? "Activa el método Anónimo en Firebase Authentication."
+            : "No fue posible conectar el acceso anónimo; la app continuará guardando en este dispositivo.";
+          finishFirstConnection();
+          render();
+        } finally {
+          anonymousSignInPending = false;
+        }
       });
     });
   } catch (error) {
@@ -354,6 +383,7 @@ async function initCloud() {
     state.authReady = true;
     state.cloudEnabled = false;
     state.cloudStatus = "error";
+    state.authError = "No fue posible iniciar Firebase; la app continuará en modo local.";
   }
 }
 
@@ -451,7 +481,7 @@ function cloudLabel() {
     offline: ["↻", "Sin conexión"],
     error: ["!", "Error de nube"],
     local: ["⌂", "Modo local"],
-    "signed-out": ["○", "Sin sesión"]
+    "auth-error": ["!", "Acceso anónimo no disponible"]
   };
   return labels[state.cloudStatus] || labels.local;
 }
@@ -461,7 +491,7 @@ function header(title, subtitle = "", back = false) {
   return `<header class="topbar"><div class="topbar-inner ${back ? "has-back" : "has-brand"}">
     ${back ? `<button class="icon-button" data-action="back" aria-label="Regresar">←</button>` : `<div class="brand-mark"><img src="./logo-mps-header.png" alt="Metal Plating y Servicios"></div>`}
     <div class="topbar-copy"><strong>${escapeHtml(title)}</strong>${subtitle ? `<span>${escapeHtml(subtitle)}</span>` : ""}</div>
-    ${state.user ? `<button class="topbar-action cloud-action" data-action="logout" title="${escapeHtml(label)} · Cerrar sesión"><b>${icon}</b></button>` : `<div class="topbar-action" title="${escapeHtml(label)}">${icon}</div>`}
+    <div class="topbar-action cloud-action" title="${escapeHtml(label)}"><b>${icon}</b></div>
   </div></header>`;
 }
 
@@ -471,27 +501,6 @@ function bottomNav() {
     <button data-view="history" class="${state.view === "history" ? "active" : ""}"><b>◷</b><span>Historial</span></button>
     <button data-view="dashboard" class="${state.view === "dashboard" ? "active" : ""}"><b>▥</b><span>Resultados</span></button>
   </nav>`;
-}
-
-function renderLogin() {
-  app.innerHTML = `<main class="login-page">
-    <section class="login-card">
-      <img class="login-logo" src="./logo-mps-full.png" alt="Metal Plating y Servicios">
-      <p class="eyebrow">Acceso interno</p>
-      <h1>Auditoría 5S MPS</h1>
-      <p>Ingresa con una cuenta autorizada para registrar auditorías y consultar los resultados desde cualquier dispositivo.</p>
-      <form id="loginForm" class="login-form">
-        <label class="field-label" for="loginEmail">Correo</label>
-        <input id="loginEmail" class="text-input" type="email" autocomplete="username" required placeholder="usuario@metalplating.mx">
-        <label class="field-label" for="loginPassword">Contraseña</label>
-        <input id="loginPassword" class="text-input" type="password" autocomplete="current-password" required placeholder="Contraseña">
-        <button class="primary-button" type="submit">Entrar</button>
-      </form>
-      ${state.loginError ? `<div class="error-message">${escapeHtml(state.loginError)}</div>` : ""}
-      <p class="login-note">Las cuentas se crean en Firebase; la app no permite registro público.</p>
-    </section>
-  </main>`;
-  document.getElementById("loginForm").addEventListener("submit", handleLogin);
 }
 
 function renderHome() {
@@ -507,7 +516,7 @@ function renderHome() {
   app.innerHTML = `${header("Auditoría 5S MPS", "Recorrido semanal con criterios claros")}
     <main class="page page-with-nav">
       <section class="welcome-card"><div class="welcome-icon">✦</div><div><p class="eyebrow">Bienvenido</p><h1>Comencemos el recorrido</h1><p>Selecciona el área. La app te guiará pregunta por pregunta y al final preparará la retroalimentación.</p></div></section>
-      <section class="sync-card ${state.cloudStatus}"><b>${cloudIcon}</b><div><strong>${escapeHtml(cloudText)}</strong><span>${state.cloudEnabled ? `Sesión: ${escapeHtml(state.user?.email || "cuenta autorizada")}` : "Configura Firebase para compartir resultados entre dispositivos."}</span></div></section>
+      <section class="sync-card ${state.cloudStatus}"><b>${cloudIcon}</b><div><strong>${escapeHtml(cloudText)}</strong><span>${state.user ? "Acceso anónimo activo. Las auditorías se comparten entre los dispositivos que abran esta app." : state.authError ? escapeHtml(state.authError) : "Configura Firebase y activa el acceso anónimo para compartir resultados."}</span></div></section>
       <label class="field-label" for="auditor">Nombre del auditor</label>
       <input id="auditor" class="text-input" value="${escapeHtml(state.auditor)}" placeholder="Ej. Nombre de la auditora">
       ${state.pendingDraft ? `<button class="resume-card" data-action="resume"><div><strong>Continuar auditoría pendiente</strong><span>${escapeHtml(state.pendingDraft.value.area.full)} · Pregunta ${state.pendingDraft.value.index + 1} de 10</span></div><b>›</b></button>` : ""}
@@ -620,29 +629,12 @@ function renderDashboard() {
 
 function render() {
   if (state.loading || !state.authReady) return;
-  if (state.cloudConfigured && !state.user) return renderLogin();
   if (state.selectedAudit) return renderDetail();
   if (state.draft && state.summary) return renderSummary();
   if (state.draft) return renderWizard();
   if (state.view === "history") return renderHistory();
   if (state.view === "dashboard") return renderDashboard();
   return renderHome();
-}
-
-async function handleLogin(event) {
-  event.preventDefault();
-  state.loginError = "";
-  const email = document.getElementById("loginEmail").value.trim();
-  const password = document.getElementById("loginPassword").value;
-  const button = event.submitter || event.currentTarget.querySelector("button[type='submit']");
-  if (button) { button.disabled = true; button.textContent = "Ingresando…"; }
-  try {
-    await cloudAuth.signInWithEmailAndPassword(email, password);
-  } catch (error) {
-    console.error(error);
-    state.loginError = "No fue posible iniciar sesión. Revisa el correo, la contraseña y que la cuenta esté habilitada.";
-    renderLogin();
-  }
 }
 
 async function saveCurrentDraft() {
@@ -744,7 +736,7 @@ function auditForCloud(audit) {
       photos: (answer.photos || []).map(({ id, name, createdAt }) => ({ id, name, createdAt }))
     })),
     createdBy: state.user.uid,
-    createdByEmail: state.user.email || "",
+    authenticationMode: state.user.isAnonymous ? "anonymous" : "authenticated",
     syncedAt: firebase.firestore.FieldValue.serverTimestamp()
   };
 }
@@ -961,7 +953,6 @@ app.addEventListener("click", async (event) => {
   if (nav) { state.view = nav.dataset.view; state.selectedAudit = null; render(); return; }
   const action = event.target.closest("[data-action]")?.dataset.action;
   if (!action) return;
-  if (action === "logout") { if (cloudAuth) await cloudAuth.signOut(); return; }
   if (action === "add-photo") return document.getElementById("photoInput").click();
   if (action === "next") {
     const answer = state.draft.answers[state.draft.index];
@@ -986,7 +977,20 @@ app.addEventListener("click", async (event) => {
 });
 
 window.addEventListener("online", () => {
-  if (state.cloudEnabled && state.user) {
+  if (state.cloudConfigured && cloudAuth && !state.user) {
+    state.cloudEnabled = true;
+    state.cloudStatus = "connecting";
+    state.authError = "";
+    cloudAuth.signInAnonymously().catch((error) => {
+      console.error("Reintento de acceso anónimo", error);
+      state.cloudEnabled = false;
+      state.cloudStatus = "auth-error";
+      state.authError = error.code === "auth/operation-not-allowed"
+        ? "Activa el método Anónimo en Firebase Authentication."
+        : "No fue posible restablecer la conexión anónima.";
+      render();
+    });
+  } else if (state.cloudEnabled && state.user) {
     state.cloudStatus = "connecting";
     syncPendingAudits().catch(console.error);
   }

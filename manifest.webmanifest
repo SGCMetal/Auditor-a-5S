@@ -5,7 +5,7 @@
   "display": "standalone",
   "background_color": "#f4f7fb",
   "theme_color": "#0b356d",
-  "description": "Auditorías 5S MPS con evidencia, planes de mejora y sincronización entre dispositivos.",
+  "description": "Auditorías 5S MPS con acceso anónimo, evidencia, planes de mejora y sincronización entre dispositivos.",
   "icons": [
     {
       "src": "./icon-mps-192.png",

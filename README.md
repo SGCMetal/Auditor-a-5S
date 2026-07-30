@@ -1,6 +1,12 @@
-# App Auditoría 5S MPS — Versión 1.2 Cloud
+# App Auditoría 5S MPS — Versión 1.3 Anónima
 
-Aplicación web progresiva para realizar las auditorías semanales 5S desde el celular y consultar los resultados desde otros dispositivos.
+Aplicación web progresiva para realizar auditorías semanales 5S desde el celular y consultar los resultados desde otros dispositivos, **sin correos ni contraseñas**.
+
+## Cómo funciona el acceso
+
+Al abrir la app, Firebase crea automáticamente una sesión anónima en ese navegador. La auditora solo escribe su nombre en la pantalla principal; ese nombre queda registrado dentro de cada auditoría.
+
+Todos los dispositivos que abran la misma aplicación y tengan Firebase configurado podrán consultar el historial compartido.
 
 ## Qué incluye
 
@@ -10,73 +16,52 @@ Aplicación web progresiva para realizar las auditorías semanales 5S desde el c
 - Cálculo automático del resultado.
 - Plan de mejora 5S con recomendaciones prácticas.
 - Historial, panel por área y exportación a Excel.
-- Inicio de sesión con cuentas autorizadas.
+- Acceso anónimo automático con Firebase Authentication.
 - Sincronización de auditorías y fotografías con Cloud Firestore.
 - Copia local mediante IndexedDB.
-- Soporte para trabajo temporal sin conexión mediante la caché de Firestore y la PWA.
-
-## Arquitectura de esta versión
-
-- **GitHub Pages o Firebase Hosting:** publica la aplicación.
-- **Firebase Authentication:** controla quién puede entrar.
-- **Cloud Firestore:** guarda auditorías y fotografías comprimidas.
-- **IndexedDB:** mantiene una copia local y los borradores.
-
-Las fotografías se almacenan como documentos individuales dentro de la subcolección `audits/{auditId}/photos`. Se comprimen antes de guardarse para mantenerse debajo del límite por documento.
+- Trabajo temporal sin conexión mediante la caché de Firestore y la PWA.
 
 ## Configuración necesaria
 
-Sigue el archivo [CONFIGURACION-FIREBASE.md](./CONFIGURACION-FIREBASE.md).
+Sigue [CONFIGURACION-FIREBASE.md](./CONFIGURACION-FIREBASE.md). En resumen:
 
-Al terminar, edita `config.js` y pega la configuración web de Firebase:
+1. Crea un proyecto de Firebase.
+2. Registra una aplicación web.
+3. Activa **Authentication > Anónimo**.
+4. Crea Firestore en modo de producción.
+5. Publica `firestore.rules`.
+6. Pega el objeto `firebaseConfig` dentro de `config.js`.
+7. Publica los archivos en GitHub Pages o Firebase Hosting.
 
-```js
-window.MPS_CONFIG = {
-  FIREBASE: {
-    apiKey: "...",
-    authDomain: "...",
-    projectId: "...",
-    storageBucket: "...",
-    messagingSenderId: "...",
-    appId: "..."
-  },
-  AI_ENDPOINT: ""
-};
-```
+La configuración web de Firebase es pública. No coloques contraseñas ni claves privadas en `config.js`.
 
-La configuración web de Firebase es pública y puede estar en GitHub. No coloques contraseñas ni claves privadas en `config.js`.
-
-## Probar en la computadora
+## Probar localmente
 
 ```bash
 python3 -m http.server 8080
 ```
 
-Después abre:
-
-```text
-http://localhost:8080
-```
+Abre `http://localhost:8080`.
 
 ## Publicar en GitHub Pages
 
 1. Sube el contenido de esta carpeta a la raíz del repositorio.
 2. Abre `Settings > Pages`.
 3. Selecciona `Deploy from a branch`.
-4. Elige la rama principal y la carpeta `/ (root)`.
+4. Elige la rama principal y `/ (root)`.
 5. Guarda y abre el enlace publicado.
 
-## Prueba recomendada antes del recorrido
+## Seguridad de esta versión
 
-1. Inicia sesión en el celular de la auditora.
-2. Inicia sesión en la computadora del Coordinador del SGC.
-3. Desde el celular realiza una auditoría de prueba con una fotografía.
-4. Guarda la auditoría.
-5. En la computadora abre `Historial` y confirma que aparezcan resultado, recomendaciones y fotografía.
-6. Exporta el Excel.
+Esta modalidad es práctica para la prueba inmediata, pero **el enlace de la app funciona como la llave de acceso**: cualquier persona que lo obtenga podrá crear una sesión anónima y consultar o registrar información porque las reglas permiten acceso a cualquier usuario autenticado.
 
-## Seguridad
+Para reducir exposición:
 
-La aplicación no permite registrar cuentas nuevas. Las cuentas deben crearse manualmente en Firebase Authentication.
+- No publiques el enlace en sitios abiertos.
+- No lo compartas fuera del personal autorizado.
+- El proyecto incluye `noindex,nofollow` para desalentar su aparición en buscadores.
+- En una etapa posterior conviene agregar cuentas, roles o App Check.
 
-Las reglas incluidas permiten lectura y escritura únicamente a usuarios autenticados. Para una etapa posterior se pueden separar permisos de auditor y administrador.
+## Fotografías
+
+Las fotografías se comprimen y se guardan como documentos individuales en `audits/{auditId}/photos`. No se utiliza Cloud Storage en esta versión.
