@@ -327,10 +327,10 @@ function buildPlan(answers, aiSuggestions = []) {
 }
 
 function header(title, subtitle = "", back = false) {
-  return `<header class="topbar"><div class="topbar-inner">
-    ${back ? `<button class="icon-button" data-action="back" aria-label="Regresar">←</button>` : `<div class="brand-mark"><img src="./logo-mps.png" alt="MPS"></div>`}
+  return `<header class="topbar"><div class="topbar-inner ${back ? "has-back" : "has-brand"}">
+    ${back ? `<button class="icon-button" data-action="back" aria-label="Regresar">←</button>` : `<div class="brand-mark"><img src="./logo-mps-header.png" alt="Metal Plating y Servicios"></div>`}
     <div class="topbar-copy"><strong>${escapeHtml(title)}</strong>${subtitle ? `<span>${escapeHtml(subtitle)}</span>` : ""}</div>
-    <div class="topbar-action">✓</div>
+    <div class="topbar-action" aria-hidden="true">✓</div>
   </div></header>`;
 }
 

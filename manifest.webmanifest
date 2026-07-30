@@ -8,7 +8,13 @@
   "description": "Auditorías 5S, evidencia fotográfica y planes de mejora por área.",
   "icons": [
     {
-      "src": "./logo-mps.png",
+      "src": "./icon-mps-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icon-mps-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"

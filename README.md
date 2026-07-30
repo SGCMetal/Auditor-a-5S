@@ -69,3 +69,9 @@ window.MPS_CONFIG = {
 ```
 
 Las sugerencias visuales no cambian la calificación oficial; enriquecen la retroalimentación para el área.
+
+## Ajuste visual v1.1
+
+- Se sustituyó el recorte cuadrado del encabezado por el logotipo completo de MPS.
+- Se agregó un ícono cuadrado independiente para instalación en celular y pestaña del navegador.
+- Se actualizó la caché de la PWA para que el nuevo logotipo aparezca al volver a publicar.
