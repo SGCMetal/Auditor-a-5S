@@ -1,0 +1,17 @@
+{
+  "name": "Auditoría 5S MPS",
+  "short_name": "5S MPS",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f4f7fb",
+  "theme_color": "#0b356d",
+  "description": "Auditorías 5S, evidencia fotográfica y planes de mejora por área.",
+  "icons": [
+    {
+      "src": "./logo-mps.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
