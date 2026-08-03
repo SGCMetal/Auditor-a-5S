@@ -1,8 +1,8 @@
 {
   "name": "mps-auditoria-5s",
   "private": true,
-  "version": "0.3.0",
-  "description": "PWA de auditorías 5S MPS con acceso anónimo y sincronización en Firebase",
+  "version": "0.4.0",
+  "description": "PWA de auditorías 5S MPS con evidencia ampliada, análisis visual, QR público y sincronización Firebase",
   "scripts": {
     "serve": "python3 -m http.server 8080"
   }

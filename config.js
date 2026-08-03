@@ -10,5 +10,6 @@ window.MPS_CONFIG = {
     messagingSenderId: "236622120310",
     appId: "1:236622120310:web:6be6f8325842c49418e657"
   },
+  // Después de publicar la función analyze5SEvidence, pega aquí su URL HTTPS.
   AI_ENDPOINT: ""
 };

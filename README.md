@@ -1,67 +1,45 @@
-# App Auditoría 5S MPS — Versión 1.3 Anónima
+# App Auditoría 5S MPS — versión 1.4
 
-Aplicación web progresiva para realizar auditorías semanales 5S desde el celular y consultar los resultados desde otros dispositivos, **sin correos ni contraseñas**.
+PWA para recorridos semanales 5S de Metal Plating y Servicios.
 
-## Cómo funciona el acceso
+## Novedades de esta versión
 
-Al abrir la app, Firebase crea automáticamente una sesión anónima en ese navegador. La auditora solo escribe su nombre en la pantalla principal; ese nombre queda registrado dentro de cada auditoría.
+- Hasta 5 fotografías por cada pregunta.
+- Hasta 5 fotografías generales del área.
+- Paso independiente de evidencia general al terminar las 10 preguntas.
+- Análisis visual automático al final del recorrido cuando se conecta la función segura de IA.
+- La IA describe únicamente lo visible, relaciona hallazgos con los criterios y sugiere mejoras; nunca cambia la calificación oficial.
+- Recomendaciones editables u ocultables antes de guardar.
+- Publicación de evidencias por auditoría.
+- Generación y descarga de un QR semanal.
+- Portal de evidencias para responsables, sin acceso a las pantallas administrativas desde el QR.
+- Comparación de fotografías generales con la auditoría anterior cuando ambas fueron publicadas.
+- Envío opcional de comentario o hasta 3 fotografías de mejora.
+- Evidencias de mejora visibles en el detalle interno como “Pendiente de revisión”.
+- Exportación de Excel con resumen, detalle, plan de mejora y enlaces QR.
 
-Todos los dispositivos que abran la misma aplicación y tengan Firebase configurado podrán consultar el historial compartido.
+## Flujo de uso
 
-## Qué incluye
+1. La auditora selecciona el área.
+2. Evalúa las 10 preguntas y puede tomar hasta 5 fotos en cada una.
+3. Agrega, si lo desea, fotografías generales del área.
+4. La app genera el resultado y el plan de mejora.
+5. Si la función de IA está activa, las imágenes se analizan al final.
+6. La auditora revisa, edita u oculta recomendaciones.
+7. Guarda y sincroniza la auditoría.
+8. Desde el detalle, pulsa **Publicar y generar QR**.
+9. Descarga el QR y lo coloca en el tablero semanal.
+10. El responsable escanea el QR y consulta la evidencia y las recomendaciones.
+11. Opcionalmente, el área comparte una evidencia de mejora.
 
-- Las 11 áreas de MPS.
-- Las 10 preguntas con criterios específicos del 1 al 5.
-- Observaciones y hasta dos fotografías por pregunta.
-- Cálculo automático del resultado.
-- Plan de mejora 5S con recomendaciones prácticas.
-- Historial, panel por área y exportación a Excel.
-- Acceso anónimo automático con Firebase Authentication.
-- Sincronización de auditorías y fotografías con Cloud Firestore.
-- Copia local mediante IndexedDB.
-- Trabajo temporal sin conexión mediante la caché de Firestore y la PWA.
+## Puesta en producción
 
-## Configuración necesaria
+Lee `ACTUALIZACION-V1.4.md` y realiza los pasos en orden. Es indispensable publicar las nuevas reglas de Firestore antes de usar el portal QR.
 
-Sigue [CONFIGURACION-FIREBASE.md](./CONFIGURACION-FIREBASE.md). En resumen:
+## Análisis visual
 
-1. Crea un proyecto de Firebase.
-2. Registra una aplicación web.
-3. Activa **Authentication > Anónimo**.
-4. Crea Firestore en modo de producción.
-5. Publica `firestore.rules`.
-6. Pega el objeto `firebaseConfig` dentro de `config.js`.
-7. Publica los archivos en GitHub Pages o Firebase Hosting.
+El proyecto incluye una función segura en `functions/index.js`. La clave de OpenAI no se coloca en GitHub ni en `config.js`; se almacena como secreto de Firebase Functions. El análisis visual permanecerá desactivado mientras `AI_ENDPOINT` esté vacío.
 
-La configuración web de Firebase es pública. No coloques contraseñas ni claves privadas en `config.js`.
+## Aviso de acceso
 
-## Probar localmente
-
-```bash
-python3 -m http.server 8080
-```
-
-Abre `http://localhost:8080`.
-
-## Publicar en GitHub Pages
-
-1. Sube el contenido de esta carpeta a la raíz del repositorio.
-2. Abre `Settings > Pages`.
-3. Selecciona `Deploy from a branch`.
-4. Elige la rama principal y `/ (root)`.
-5. Guarda y abre el enlace publicado.
-
-## Seguridad de esta versión
-
-Esta modalidad es práctica para la prueba inmediata, pero **el enlace de la app funciona como la llave de acceso**: cualquier persona que lo obtenga podrá crear una sesión anónima y consultar o registrar información porque las reglas permiten acceso a cualquier usuario autenticado.
-
-Para reducir exposición:
-
-- No publiques el enlace en sitios abiertos.
-- No lo compartas fuera del personal autorizado.
-- El proyecto incluye `noindex,nofollow` para desalentar su aparición en buscadores.
-- En una etapa posterior conviene agregar cuentas, roles o App Check.
-
-## Fotografías
-
-Las fotografías se comprimen y se guardan como documentos individuales en `audits/{auditId}/photos`. No se utiliza Cloud Storage en esta versión.
+El QR abre una interfaz limitada a las evidencias de una auditoría. La aplicación interna continúa usando sesiones anónimas, como se acordó para esta etapa. Esto es práctico para uso interno, pero no equivale a un control de acceso fuerte. Para impedir técnicamente que alguien con conocimientos manipule la dirección y llegue al panel interno, será necesario agregar un PIN interno o cuentas con roles.

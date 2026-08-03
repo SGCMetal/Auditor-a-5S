@@ -1,5 +1,5 @@
-const CACHE = "mps-5s-v1-3-1-configurada";
-const CORE = ["./", "./index.html", "./styles.css", "./app.js", "./config.js", "./manifest.webmanifest", "./logo-mps-header.png", "./icon-mps-192.png", "./icon-mps-512.png", "./favicon-mps.png"];
+const CACHE = "mps-5s-v1-4-evidencias-qr";
+const CORE = ["./", "./index.html", "./styles.css", "./app.js", "./config.js", "./qr-helper.js", "./manifest.webmanifest", "./logo-mps-header.png", "./icon-mps-192.png", "./icon-mps-512.png", "./favicon-mps.png"];
 self.addEventListener("install", event => { event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(CORE))); self.skipWaiting(); });
 self.addEventListener("activate", event => { event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key))))); self.clients.claim(); });
 self.addEventListener("fetch", event => {
