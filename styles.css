@@ -332,3 +332,77 @@ li + li { margin-top: 5px; }
 .public-photo-grid.comparison img { height: 165px; }
 .previous-audit-link { margin-top: 13px; display: inline-flex; color: var(--navy); font-size: .76rem; font-weight: 800; text-decoration: none; }
 @media (max-width: 640px) { .visual-comparison { grid-template-columns: 1fr; } }
+
+/* Versión 1.5: QR general y Recorrido Visual 5S */
+.dashboard-hero-actions { display:flex; flex-wrap:wrap; gap:9px; margin-top:16px; }
+.tour-launch { min-height:44px; border:1px solid rgba(255,255,255,.25); border-radius:13px; padding:0 14px; color:#0b356d; background:white; font-weight:850; }
+.tour-launch.secondary { color:white; background:rgba(255,255,255,.12); }
+.dashboard-help { margin:-3px 0 13px; font-size:.83rem; }
+.master-qr-card { display:grid; grid-template-columns:190px 1fr; gap:20px; align-items:center; padding:20px; border-radius:22px; background:white; border:1px solid #c7d7e8; box-shadow:0 8px 25px rgba(20,44,76,.07); }
+.master-qr-visual { display:grid; place-items:center; padding:10px; border-radius:18px; background:#f5f8fc; }
+.master-qr-visual canvas { width:170px; height:170px; max-width:100%; }
+
+.public-directory-page { max-width:900px; }
+.directory-hero { padding:24px; border-radius:24px; color:white; background:linear-gradient(135deg,#0b356d,#2369aa); box-shadow:0 12px 32px rgba(20,49,83,.13); }
+.directory-hero .eyebrow, .directory-hero p { color:rgba(255,255,255,.78); }
+.directory-hero h1 { margin-bottom:8px; }
+.public-area-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin-top:16px; }
+.public-area-card { min-height:104px; display:grid; grid-template-columns:48px 1fr 24px; gap:12px; align-items:center; padding:16px; border-radius:18px; color:var(--ink); text-decoration:none; background:white; border:1px solid var(--line); box-shadow:0 6px 18px rgba(20,43,74,.055); transition:.18s ease; }
+.public-area-card:hover { transform:translateY(-2px); border-color:#9fb9d6; box-shadow:0 10px 24px rgba(20,43,74,.1); }
+.public-area-card.disabled { opacity:.6; grid-template-columns:48px 1fr; }
+.public-area-card strong, .public-area-card span { display:block; }
+.public-area-card span { margin-top:4px; color:var(--muted); font-size:.74rem; }
+.public-area-card > b { color:#91a1b3; font-size:1.4rem; }
+.public-area-icon { width:48px; height:48px; display:grid; place-items:center; border-radius:14px; color:var(--navy); background:#eaf1f9; font-size:1.15rem; }
+.directory-back-link { display:inline-flex; margin:0 0 12px; color:var(--navy); font-weight:800; text-decoration:none; }
+.no-photo-note, .muted-inline { margin-top:10px; padding:10px 12px; border-radius:12px; background:#f7f9fb; color:#8390a0; font-size:.76rem; }
+
+.tour-active { overflow-x:hidden; background:#08192d; }
+.tour-shell { min-height:100vh; color:white; background:linear-gradient(180deg,#07182c,#0d2440 65%,#102b4a); }
+.tour-topbar { position:sticky; top:0; z-index:60; min-height:74px; padding:10px 18px; display:flex; justify-content:space-between; align-items:center; gap:15px; background:rgba(5,23,43,.94); backdrop-filter:blur(14px); border-bottom:1px solid rgba(255,255,255,.1); }
+.tour-brand { display:flex; align-items:center; gap:12px; min-width:0; }
+.tour-brand img { width:86px; height:50px; object-fit:contain; padding:4px 6px; border-radius:12px; background:white; }
+.tour-brand strong,.tour-brand span { display:block; }
+.tour-brand span { margin-top:3px; color:#9eb6cf; font-size:.72rem; }
+.tour-top-actions { display:flex; gap:8px; }
+.tour-top-actions button { min-height:42px; border:1px solid rgba(255,255,255,.18); border-radius:12px; padding:0 13px; color:white; background:rgba(255,255,255,.08); font-weight:800; }
+.tour-loading { min-height:100vh; display:grid; place-items:center; align-content:center; gap:15px; }
+.tour-stage { width:min(1320px,100%); margin:auto; padding:18px; display:grid; grid-template-columns:minmax(0,1.6fr) minmax(300px,.7fr); gap:16px; }
+.tour-photo-stage { position:relative; min-height:540px; overflow:hidden; border-radius:24px; background:#071526; border:1px solid rgba(255,255,255,.12); box-shadow:0 15px 42px rgba(0,0,0,.28); }
+.tour-photo-stage > img { width:100%; height:100%; min-height:540px; max-height:72vh; display:block; object-fit:contain; background:#050d17; }
+.tour-photo-caption { position:absolute; left:16px; right:16px; bottom:15px; display:flex; justify-content:space-between; gap:12px; padding:10px 13px; border-radius:13px; color:white; background:rgba(4,20,37,.8); backdrop-filter:blur(8px); font-size:.78rem; }
+.tour-photo-nav { position:absolute; top:50%; transform:translateY(-50%); width:48px; height:64px; border:1px solid rgba(255,255,255,.2); border-radius:14px; color:white; background:rgba(4,19,35,.58); font-size:2rem; }
+.tour-photo-nav.prev { left:13px; }.tour-photo-nav.next { right:13px; }
+.tour-no-photo { min-height:540px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:40px; }
+.tour-no-photo > b { font-size:3.2rem; color:#7599bc; }.tour-no-photo p { color:#92a9c1; }
+.tour-summary { padding:22px; border-radius:24px; background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.11); }
+.tour-summary h1 { margin-top:8px; font-size:clamp(1.6rem,3vw,2.45rem); }
+.tour-summary > p { color:#9fb2c7; }
+.tour-area-counter { display:inline-flex; padding:5px 9px; border-radius:999px; background:#153b63; color:#bcd6f0; font-size:.7rem; font-weight:850; }
+.tour-score { display:inline-flex; flex-direction:column; min-width:130px; padding:13px 16px; margin:8px 0; border-radius:17px; background:white; color:#16314c; }
+.tour-score strong { font-size:2.15rem; color:var(--navy); }.tour-score span { font-size:.72rem; font-weight:800; }.tour-score.good { border-left:5px solid var(--green); }.tour-score.warn { border-left:5px solid var(--orange); }.tour-score.bad { border-left:5px solid var(--red); }
+.tour-observation,.tour-recommendations { margin-top:14px; padding:14px; border-radius:16px; background:rgba(255,255,255,.065); }
+.tour-observation p,.tour-recommendations p,.tour-recommendations li { color:#c1d0df; font-size:.82rem; line-height:1.45; }
+.tour-recommendations ul { padding-left:18px; }
+.tour-thumbs { width:min(1320px,100%); margin:0 auto; padding:0 18px 16px; display:flex; gap:9px; overflow-x:auto; }
+.tour-thumb { flex:0 0 150px; padding:5px; border:1px solid rgba(255,255,255,.12); border-radius:14px; color:white; background:rgba(255,255,255,.05); text-align:left; }
+.tour-thumb.active { border-color:#72a7d9; box-shadow:0 0 0 2px rgba(114,167,217,.2); }
+.tour-thumb img { width:100%; height:82px; object-fit:cover; border-radius:9px; display:block; }.tour-thumb span { display:block; padding:6px 4px 2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:.67rem; }
+.tour-questions { width:min(1320px,100%); margin:auto; padding:8px 18px 110px; }
+.tour-section-title { display:flex; justify-content:space-between; gap:20px; align-items:flex-end; margin:15px 0 11px; }.tour-section-title span { color:#79a7d3; text-transform:uppercase; letter-spacing:.08em; font-size:.7rem; font-weight:850; }.tour-section-title h2 { margin-top:3px; font-size:1.35rem; }.tour-section-title p { color:#8da4bb; margin:0; font-size:.78rem; }
+.tour-question-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }
+.tour-question-row { min-height:86px; display:flex; justify-content:space-between; gap:12px; align-items:center; padding:13px; border-radius:16px; background:rgba(255,255,255,.065); border:1px solid rgba(255,255,255,.09); }
+.tour-question-row > div { display:grid; grid-template-columns:30px 1fr; gap:9px; align-items:start; min-width:0; }.tour-question-row > div > span { width:30px; height:30px; display:grid; place-items:center; border-radius:9px; background:#163f68; font-weight:850; }.tour-question-row strong,.tour-question-row small { display:block; }.tour-question-row strong { font-size:.82rem; }.tour-question-row small { margin-top:4px; color:#9fb2c6; font-size:.69rem; line-height:1.3; }.tour-question-row > b { flex:0 0 auto; color:#d7e8f8; font-size:1rem; }
+.tour-footer { position:fixed; z-index:70; bottom:0; left:0; right:0; min-height:78px; padding:10px 18px max(10px,env(safe-area-inset-bottom)); display:grid; grid-template-columns:160px 1fr 160px; gap:15px; align-items:center; background:rgba(5,22,40,.95); backdrop-filter:blur(14px); border-top:1px solid rgba(255,255,255,.11); }
+.tour-footer .secondary-button { color:white; background:rgba(255,255,255,.08); border-color:rgba(255,255,255,.15); }
+.tour-dots { display:flex; justify-content:center; flex-wrap:wrap; gap:6px; }.tour-dots button { width:10px; height:10px; padding:0; border:0; border-radius:50%; background:#4d6680; }.tour-dots button.active { width:26px; border-radius:999px; background:#8ab8e4; }
+
+@media (max-width:760px) {
+  .master-qr-card { grid-template-columns:1fr; }.master-qr-visual { display:none; }
+  .public-area-grid { grid-template-columns:1fr; }
+  .tour-stage { grid-template-columns:1fr; padding:10px; }.tour-photo-stage,.tour-photo-stage > img,.tour-no-photo { min-height:390px; }.tour-photo-stage > img { max-height:55vh; }
+  .tour-topbar { align-items:flex-start; }.tour-brand img { width:70px; height:44px; }.tour-top-actions button:first-child { display:none; }.tour-top-actions button { font-size:0; width:42px; padding:0; }.tour-top-actions button:last-child::after { content:'✕'; font-size:1rem; }
+  .tour-question-list { grid-template-columns:1fr; }.tour-section-title { display:block; }.tour-section-title p { margin-top:5px; }
+  .tour-footer { grid-template-columns:1fr 1fr; }.tour-dots { display:none; }
+  .dashboard-hero-actions { flex-direction:column; align-items:stretch; }
+}

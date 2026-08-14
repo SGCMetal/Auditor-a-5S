@@ -5,7 +5,7 @@
   "display": "standalone",
   "background_color": "#f4f7fb",
   "theme_color": "#0b356d",
-  "description": "Auditorías 5S MPS con evidencia ampliada, análisis visual, portal QR y seguimiento de mejoras.",
+  "description": "Auditorías 5S MPS con recorrido visual, evidencia ampliada, QR general por áreas y seguimiento de mejoras.",
   "icons": [
     {
       "src": "./icon-mps-192.png",

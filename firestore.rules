@@ -17,6 +17,15 @@ service cloud.firestore {
       }
     }
 
+    // Directorio público del QR general. Cada documento corresponde a un área
+    // conocida por la app y apunta únicamente a su auditoría publicada más reciente.
+    match /publicAreas/{areaId} {
+      allow get: if true;
+      allow list: if false;
+      allow create, update: if request.auth != null;
+      allow delete: if false;
+    }
+
     // Portal generado por QR. Solo permite obtener un documento cuando se conoce
     // su identificador aleatorio; no permite listar todas las auditorías públicas.
     match /publicAudits/{publicId} {

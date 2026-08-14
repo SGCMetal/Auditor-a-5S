@@ -211,7 +211,9 @@ const QUESTIONS = [
 const MAX_PHOTOS_PER_QUESTION = 5;
 const MAX_GENERAL_PHOTOS = 5;
 const MAX_IMPROVEMENT_PHOTOS = 3;
-const PUBLIC_TOKEN = new URLSearchParams(window.location.search).get("evidencia") || "";
+const PUBLIC_PARAMS = new URLSearchParams(window.location.search);
+const PUBLIC_TOKEN = PUBLIC_PARAMS.get("evidencia") || "";
+const PUBLIC_DIRECTORY = PUBLIC_PARAMS.get("resultados") === "1";
 
 const state = {
   view: "home",
@@ -232,18 +234,25 @@ const state = {
   aiStatus: "idle",
   aiMessage: "",
   publishStatus: "",
-  publicMode: Boolean(PUBLIC_TOKEN),
+  publicMode: Boolean(PUBLIC_TOKEN) || PUBLIC_DIRECTORY,
+  publicDirectory: PUBLIC_DIRECTORY,
   publicToken: PUBLIC_TOKEN,
+  publicAreas: {},
   publicData: null,
   publicPhotos: [],
   publicPreviousData: null,
   publicPreviousPhotos: [],
-  publicLoading: Boolean(PUBLIC_TOKEN),
+  publicLoading: Boolean(PUBLIC_TOKEN) || PUBLIC_DIRECTORY,
   publicError: "",
   improvementOpen: false,
   improvementComment: "",
   improvementPhotos: [],
-  improvementStatus: ""
+  improvementStatus: "",
+  tourMode: false,
+  tourAudit: null,
+  tourIndex: 0,
+  tourPhotoIndex: 0,
+  tourLoading: false
 };
 
 const app = document.getElementById("app");
@@ -431,12 +440,26 @@ async function initPublicPortal() {
     });
     if (!cloudAuth.currentUser) cloudAuth.signInAnonymously().catch((error) => console.warn("Acceso anónimo público", error));
 
+    if (state.publicDirectory) {
+      const areaDocs = await Promise.all(AREAS.map(async (area) => {
+        try {
+          const doc = await cloudDb.collection("publicAreas").doc(area.id).get();
+          return [area.id, doc.exists ? doc.data() : null];
+        } catch (error) {
+          console.warn(`No se pudo cargar el área ${area.id}`, error);
+          return [area.id, null];
+        }
+      }));
+      state.publicAreas = Object.fromEntries(areaDocs);
+      return;
+    }
+
     const ref = cloudDb.collection("publicAudits").doc(state.publicToken);
     const [auditDoc, photoSnapshot] = await Promise.all([
       ref.get(),
       ref.collection("photos").orderBy("order", "asc").get()
     ]);
-    if (!auditDoc.exists) throw new Error("No se encontró la auditoría asociada con este código QR.");
+    if (!auditDoc.exists) throw new Error("No se encontró la auditoría asociada con este enlace.");
     state.publicData = { id: auditDoc.id, ...auditDoc.data() };
     state.publicPhotos = photoSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
 
@@ -762,12 +785,16 @@ function publicUrlFor(publicId) {
   return `${base}?evidencia=${encodeURIComponent(publicId)}`;
 }
 
+function publicDirectoryUrl() {
+  const base = `${window.location.origin}${window.location.pathname}`;
+  return `${base}?resultados=1`;
+}
+
 function renderQrCard(audit) {
   if (!audit.publicId) {
-    return `<section class="qr-card unpublished"><div class="qr-copy"><p class="eyebrow">Acceso para responsables</p><h2>Generar QR de evidencias</h2><p>Publicará únicamente el resultado, criterios, observaciones, fotografías y recomendaciones de esta auditoría.</p><button class="primary-button inline-button" data-action="publish-evidence" ${state.publishStatus === "loading" ? "disabled" : ""}>${state.publishStatus === "loading" ? "Publicando…" : "Publicar y generar QR"}</button>${state.publishStatus === "error" ? `<div class="error-message">No fue posible publicar las evidencias.</div>` : ""}</div></section>`;
+    return `<section class="qr-card unpublished"><div class="qr-copy"><p class="eyebrow">Portal general para responsables</p><h2>Publicar esta auditoría</h2><p>Al publicarla, esta área quedará disponible en el QR general de Resultados 5S. El porcentaje se mostrará únicamente después de elegir el área.</p><button class="primary-button inline-button" data-action="publish-evidence" ${state.publishStatus === "loading" ? "disabled" : ""}>${state.publishStatus === "loading" ? "Publicando…" : "Publicar resultados y evidencias"}</button>${state.publishStatus === "error" ? `<div class="error-message">No fue posible publicar las evidencias.</div>` : ""}</div></section>`;
   }
-  const url = audit.publicUrl || publicUrlFor(audit.publicId);
-  return `<section class="qr-card published"><div class="qr-visual"><canvas id="qrCanvas" aria-label="Código QR de evidencias"></canvas></div><div class="qr-copy"><p class="eyebrow">QR semanal publicado</p><h2>Compartir evidencias del área</h2><p>Este enlace abre solamente el portal de evidencias de esta auditoría.</p><input id="publicUrl" class="text-input compact-input" readonly value="${escapeHtml(url)}"><div class="qr-actions"><button class="secondary-button" data-action="copy-public-link">Copiar enlace</button><button class="primary-button" data-action="download-qr">Descargar QR</button></div></div></section>`;
+  return `<section class="qr-card published"><div class="qr-copy"><p class="eyebrow">Publicada en el portal general</p><h2>${escapeHtml(audit.area.short)} ya está disponible</h2><p>El QR general llevará a una página para elegir el área. Al entrar a esta área se mostrarán su resultado más reciente, las 10 preguntas y las evidencias.</p><div class="qr-actions"><button class="secondary-button" data-action="open-public-directory">Abrir portal general</button><button class="primary-button" data-action="copy-public-directory">Copiar enlace general</button></div></div></section>`;
 }
 
 function renderDetail() {
@@ -785,6 +812,16 @@ function renderDetail() {
   drawCurrentQr();
 }
 
+function renderMasterQrCard() {
+  return `<section class="master-qr-card"><div class="master-qr-visual"><canvas id="masterQrCanvas" aria-label="QR general de Resultados 5S"></canvas></div><div><p class="eyebrow">Un solo QR para todos los tableros</p><h2>Portal general de Resultados 5S</h2><p>Quien lo escanee verá primero las 11 áreas sin porcentajes. Al elegir un área, abrirá su auditoría publicada más reciente con las evidencias y recomendaciones.</p><div class="qr-actions"><button class="secondary-button" data-action="open-public-directory">Vista previa</button><button class="secondary-button" data-action="copy-public-directory">Copiar enlace</button><button class="primary-button" data-action="download-master-qr">Descargar QR general</button></div></div></section>`;
+}
+
+function drawMasterQr() {
+  const canvas = document.getElementById("masterQrCanvas");
+  if (!canvas || !window.MPS_QR) return;
+  window.MPS_QR.drawCanvas(canvas, publicDirectoryUrl(), { size: 320, dark: "#0b356d", level: "M" });
+}
+
 function renderDashboard() {
   const globalAverage = state.audits.length ? Math.round(state.audits.reduce((sum, item) => sum + item.result, 0) / state.audits.length) : 0;
   const rows = AREAS.map((area) => {
@@ -793,7 +830,11 @@ function renderDashboard() {
     const average = areaAudits.length ? Math.round(areaAudits.reduce((sum, item) => sum + item.result, 0) / areaAudits.length) : null;
     return `<div class="dashboard-row"><div><strong>${escapeHtml(area.short)}</strong><span>${latest ? `Último: ${latest.result}% · Promedio: ${average}%` : "Sin datos"}</span></div><div class="dashboard-bar"><div style="width:${latest?.result || 0}%"></div></div><strong class="dashboard-value">${latest ? `${latest.result}%` : "—"}</strong></div>`;
   }).join("");
-  app.innerHTML = `${header("Resultados 5S", "Vista general de las áreas")}<main class="page page-with-nav"><section class="dashboard-hero"><div><p class="eyebrow">Promedio registrado</p><h1>${globalAverage}%</h1><p>${state.audits.length ? `${state.audits.length} auditorías consideradas` : "Completa auditorías para comenzar a medir"}</p></div><b>▥</b></section><div class="section-heading"><div><p class="eyebrow">Desempeño</p><h2>Último resultado por área</h2></div></div><div class="dashboard-list">${rows}</div></main>${bottomNav()}`;
+  app.innerHTML = `${header("Resultados 5S", "Vista general de las áreas")}<main class="page page-with-nav"><section class="dashboard-hero"><div><p class="eyebrow">Promedio registrado</p><h1>${globalAverage}%</h1><p>${state.audits.length ? `${state.audits.length} auditorías consideradas` : "Completa auditorías para comenzar a medir"}</p><div class="dashboard-hero-actions"><button class="tour-launch" data-action="start-tour" ${state.audits.length ? "" : "disabled"}>▶ Iniciar Recorrido Visual 5S</button><button class="tour-launch secondary" data-action="start-tour-fullscreen" ${state.audits.length ? "" : "disabled"}>⛶ Presentar en pantalla completa</button></div></div><b>▥</b></section>
+    <div class="section-heading"><div><p class="eyebrow">Presentación</p><h2>Recorrido visual por las áreas</h2></div></div><p class="dashboard-help">Avanza por las áreas en el orden del recorrido físico. Se mostrarán fotografías, resultado, observaciones, recomendaciones y las 10 preguntas evaluadas.</p>
+    ${renderMasterQrCard()}
+    <div class="section-heading"><div><p class="eyebrow">Desempeño</p><h2>Último resultado por área</h2></div></div><div class="dashboard-list">${rows}</div></main>${bottomNav()}`;
+  drawMasterQr();
 }
 
 function publicPhotoGroups() {
@@ -806,29 +847,47 @@ function publicPhotoGroups() {
   return { general, byQuestion };
 }
 
-function publicHeader() {
-  return `<header class="public-header"><div><img src="./logo-mps-header.png" alt="Metal Plating y Servicios"><div><strong>Evidencias de Auditoría 5S</strong><span>Consulta de resultados y oportunidades de mejora</span></div></div></header>`;
+function publicHeader(detail = false) {
+  return `<header class="public-header"><div><img src="./logo-mps-header.png" alt="Metal Plating y Servicios"><div><strong>${detail ? "Evidencias de Auditoría 5S" : "Resultados 5S MPS"}</strong><span>${detail ? "Consulta de resultados y oportunidades de mejora" : "Selecciona tu área para consultar la evaluación más reciente"}</span></div></div></header>`;
+}
+
+function renderPublicDirectory() {
+  const cards = AREAS.map((area) => {
+    const published = state.publicAreas[area.id];
+    if (!published?.publicId) {
+      return `<article class="public-area-card disabled"><div class="public-area-icon">${area.icon}</div><div><strong>${escapeHtml(area.short)}</strong><span>Sin evaluación publicada</span></div></article>`;
+    }
+    return `<a class="public-area-card" href="${escapeHtml(publicUrlFor(published.publicId))}"><div class="public-area-icon">${area.icon}</div><div><strong>${escapeHtml(area.short)}</strong><span>Ver resultado y evidencias</span></div><b>›</b></a>`;
+  }).join("");
+  app.innerHTML = `${publicHeader(false)}<main class="public-page public-directory-page"><section class="directory-hero"><p class="eyebrow">Portal de retroalimentación</p><h1>Elige tu área</h1><p>Consulta la auditoría 5S más reciente, las fotografías que respaldan el resultado y las recomendaciones para mejorar. El porcentaje se mostrará al entrar al área.</p></section><div class="public-area-grid">${cards}</div><footer class="public-footer">Metal Plating y Servicios · Auditoría 5S</footer></main>`;
 }
 
 function renderPublicPortal() {
   document.body.classList.add("public-mode");
   if (state.publicLoading) {
-    app.innerHTML = `${publicHeader()}<main class="public-page"><section class="public-loading"><span class="loader"></span><h1>Cargando evidencias…</h1></section></main>`;
+    app.innerHTML = `${publicHeader(!state.publicDirectory)}<main class="public-page"><section class="public-loading"><span class="loader"></span><h1>Cargando resultados…</h1></section></main>`;
     return;
   }
-  if (state.publicError || !state.publicData) {
-    app.innerHTML = `${publicHeader()}<main class="public-page"><section class="empty-state"><b>!</b><h1>No fue posible abrir las evidencias</h1><p>${escapeHtml(state.publicError || "El enlace no es válido.")}</p></section></main>`;
+  if (state.publicError) {
+    app.innerHTML = `${publicHeader(!state.publicDirectory)}<main class="public-page"><section class="empty-state"><b>!</b><h1>No fue posible abrir los resultados</h1><p>${escapeHtml(state.publicError)}</p></section></main>`;
+    return;
+  }
+  if (state.publicDirectory) return renderPublicDirectory();
+  if (!state.publicData) {
+    app.innerHTML = `${publicHeader(true)}<main class="public-page"><section class="empty-state"><b>!</b><h1>No fue posible abrir las evidencias</h1><p>El enlace no es válido.</p></section></main>`;
     return;
   }
 
   const data = state.publicData;
   const level = resultLevel(Number(data.result));
   const { general, byQuestion } = publicPhotoGroups();
-  const answerCards = (data.answers || []).filter((answer) => answer.photoCount || answer.observation || Number(answer.score) < 5).map((answer) => {
-    const q = QUESTIONS.find((item) => item.id === Number(answer.questionId));
-    const photos = (byQuestion.get(Number(answer.questionId)) || []).map((photo) => `<img src="${photo.dataUrl}" alt="Evidencia de ${escapeHtml(q.title)}">`).join("");
-    const plan = (data.plan || []).find((item) => Number(item.questionId) === Number(answer.questionId));
-    return `<article class="public-evidence-card"><div class="public-card-heading"><div><span class="question-chip">Pregunta ${q.id}</span><h2>${escapeHtml(q.title)}</h2></div><div class="mini-score">${answer.score}/5</div></div><p class="public-question">${escapeHtml(q.question)}</p><div class="criterion-public"><strong>Criterio aplicado</strong><span>${escapeHtml(answer.criterion)}</span></div>${answer.observation ? `<p><strong>Observación del recorrido:</strong> ${escapeHtml(answer.observation)}</p>` : ""}${plan?.finding ? `<p><strong>Análisis de la evidencia:</strong> ${escapeHtml(plan.finding)}</p>` : ""}${photos ? `<div class="public-photo-grid">${photos}</div>` : ""}${plan?.actions?.length ? `<div class="public-recommendations"><strong>Para mejorar el resultado</strong><ul>${plan.actions.map((action) => `<li>${escapeHtml(action)}</li>`).join("")}</ul></div>` : ""}</article>`;
+  const answerMap = new Map((data.answers || []).map((answer) => [Number(answer.questionId), answer]));
+  const planMap = new Map((data.plan || []).map((item) => [Number(item.questionId), item]));
+  const answerCards = QUESTIONS.map((q) => {
+    const answer = answerMap.get(q.id) || { questionId: q.id, score: "—", criterion: "Sin registro", observation: "", photoCount: 0 };
+    const photos = (byQuestion.get(q.id) || []).map((photo) => `<img src="${photo.dataUrl}" alt="Evidencia de ${escapeHtml(q.title)}">`).join("");
+    const plan = planMap.get(q.id);
+    return `<article class="public-evidence-card"><div class="public-card-heading"><div><span class="question-chip">Pregunta ${q.id} de 10</span><h2>${escapeHtml(q.title)}</h2></div><div class="mini-score">${answer.score}/5</div></div><p class="public-question">${escapeHtml(q.question)}</p><div class="criterion-public"><strong>Criterio aplicado</strong><span>${escapeHtml(answer.criterion || "Sin criterio registrado")}</span></div>${answer.observation ? `<p><strong>Observación del recorrido:</strong> ${escapeHtml(answer.observation)}</p>` : `<p class="muted-inline">Sin observaciones adicionales.</p>`}${plan?.finding ? `<p><strong>Análisis / retroalimentación:</strong> ${escapeHtml(plan.finding)}</p>` : ""}${photos ? `<div class="public-photo-grid">${photos}</div>` : `<div class="no-photo-note">Sin fotografías asociadas a esta pregunta.</div>`}${plan?.actions?.length ? `<div class="public-recommendations"><strong>Para mejorar el resultado</strong><ul>${plan.actions.map((action) => `<li>${escapeHtml(action)}</li>`).join("")}</ul></div>` : ""}</article>`;
   }).join("");
 
   const generalPhotos = general.map((photo) => `<img src="${photo.dataUrl}" alt="Vista general del área">`).join("");
@@ -837,12 +896,13 @@ function renderPublicPortal() {
   const strengths = (data.plan || []).filter((item) => Number(item.score) >= 4).slice(0, 4);
   const opportunities = (data.plan || []).filter((item) => Number(item.score) < 4).slice(0, 5);
 
-  app.innerHTML = `${publicHeader()}<main class="public-page">
-    <section class="public-hero ${level.tone}"><div><p class="eyebrow">Auditoría semanal</p><h1>${escapeHtml(data.area.full)}</h1><p>${formatDate(data.completedAt)}</p></div><div class="public-result"><strong>${data.result}%</strong><span>${level.label}</span></div></section>
+  app.innerHTML = `${publicHeader(true)}<main class="public-page">
+    <a class="directory-back-link" href="${escapeHtml(publicDirectoryUrl())}">‹ Elegir otra área</a>
+    <section class="public-hero ${level.tone}"><div><p class="eyebrow">Auditoría semanal más reciente</p><h1>${escapeHtml(data.area.full)}</h1><p>${formatDate(data.completedAt)}</p></div><div class="public-result"><strong>${data.result}%</strong><span>${level.label}</span></div></section>
     <section class="public-summary-grid"><article><b>✓</b><div><strong>Fortalezas</strong><ul>${strengths.length ? strengths.map((item) => `<li>${escapeHtml(item.title)} (${item.score}/5)</li>`).join("") : "<li>Continúa trabajando en los criterios evaluados.</li>"}</ul></div></article><article><b>↗</b><div><strong>Oportunidades principales</strong><ul>${opportunities.length ? opportunities.map((item) => `<li>${escapeHtml(item.title)} (${item.score}/5)</li>`).join("") : "<li>El área alcanzó resultados sólidos en todos los criterios.</li>"}</ul></div></article></section>
-    ${general.length || data.generalObservation ? `<div class="public-section-title"><p class="eyebrow">Vista general</p><h2>Condición del área</h2></div><section class="public-general-card">${data.generalObservation ? `<p>${escapeHtml(data.generalObservation)}</p>` : ""}${data.generalAnalysis ? `<div class="general-analysis-public"><strong>Análisis visual</strong><p>${escapeHtml(data.generalAnalysis)}</p></div>` : ""}${previousGeneral.length && general.length ? `<div class="visual-comparison"><article><div class="comparison-label"><span>Auditoría anterior</span><strong>${state.publicPreviousData?.result ?? data.previous?.result ?? "—"}%</strong></div><div class="public-photo-grid comparison">${previousGeneralPhotos}</div></article><article><div class="comparison-label"><span>Auditoría actual</span><strong>${data.result}%</strong></div><div class="public-photo-grid comparison">${generalPhotos}</div></article></div>` : generalPhotos ? `<div class="public-photo-grid general">${generalPhotos}</div>` : ""}${data.previous?.publicId ? `<a class="previous-audit-link" href="${escapeHtml(publicUrlFor(data.previous.publicId))}">Consultar las evidencias completas de la auditoría anterior →</a>` : ""}</section>` : ""}
-    <div class="public-section-title"><p class="eyebrow">Evidencias y explicación</p><h2>¿Por qué se obtuvo este resultado?</h2></div>
-    <div class="public-evidence-list">${answerCards || `<section class="empty-inline">Esta auditoría no contiene evidencias fotográficas publicadas.</section>`}</div>
+    ${general.length || data.generalObservation ? `<div class="public-section-title"><p class="eyebrow">Vista general</p><h2>Condición del área</h2></div><section class="public-general-card">${data.generalObservation ? `<p>${escapeHtml(data.generalObservation)}</p>` : ""}${data.generalAnalysis ? `<div class="general-analysis-public"><strong>Análisis visual</strong><p>${escapeHtml(data.generalAnalysis)}</p></div>` : ""}${previousGeneral.length && general.length ? `<div class="visual-comparison"><article><div class="comparison-label"><span>Auditoría anterior</span><strong>${state.publicPreviousData?.result ?? data.previous?.result ?? "—"}%</strong></div><div class="public-photo-grid comparison">${previousGeneralPhotos}</div></article><article><div class="comparison-label"><span>Auditoría actual</span><strong>${data.result}%</strong></div><div class="public-photo-grid comparison">${generalPhotos}</div></article></div>` : generalPhotos ? `<div class="public-photo-grid general">${generalPhotos}</div>` : ""}</section>` : ""}
+    <div class="public-section-title"><p class="eyebrow">Las 10 preguntas</p><h2>¿Cómo se obtuvo este resultado?</h2></div>
+    <div class="public-evidence-list">${answerCards}</div>
     <section class="optional-improvement"><div><p class="eyebrow">Participación opcional</p><h2>¿Ya realizaron alguna mejora?</h2><p>Pueden compartir un comentario o fotografías. Esto no cambia la calificación y quedará pendiente de revisión por el SGC.</p></div><button class="secondary-button" data-action="toggle-improvement">${state.improvementOpen ? "Cerrar formulario" : "Agregar evidencia de mejora"}</button></section>
     ${state.improvementOpen ? `<section class="improvement-form"><label class="field-label" for="improvementComment">Comentario opcional</label><textarea id="improvementComment" maxlength="800" placeholder="Describe brevemente lo que mejoraron…">${escapeHtml(state.improvementComment)}</textarea><div class="photo-heading"><div><strong>Fotografías de mejora</strong><span>Hasta ${MAX_IMPROVEMENT_PHOTOS} fotos opcionales</span></div><span>${state.improvementPhotos.length}/${MAX_IMPROVEMENT_PHOTOS}</span></div>${renderPhotoGrid(state.improvementPhotos, "data-remove-improvement-photo", "add-improvement-photo", MAX_IMPROVEMENT_PHOTOS, "Evidencia de mejora")}<input id="improvementPhotoInput" class="hidden-input" type="file" accept="image/*" capture="environment" multiple><button class="primary-button full-button" data-action="submit-improvement" ${state.improvementStatus === "loading" ? "disabled" : ""}>${state.improvementStatus === "loading" ? "Enviando evidencia…" : "Enviar evidencia para revisión"}</button>${state.improvementStatus && state.improvementStatus !== "loading" ? `<div class="${state.improvementStatus === "success" ? "success-message" : "error-message"}">${state.improvementStatus === "success" ? "La evidencia se envió correctamente y quedó pendiente de revisión." : "No fue posible enviar la evidencia. Intenta nuevamente."}</div>` : ""}</section>` : ""}
     <footer class="public-footer">Metal Plating y Servicios · Auditoría 5S</footer>
@@ -854,9 +914,83 @@ function renderPublicPortal() {
   }
 }
 
+function latestAuditsInAreaOrder() {
+  return AREAS.map((area) => state.audits.find((audit) => audit.area.id === area.id)).filter(Boolean);
+}
+
+function tourPhotos(audit) {
+  const photos = [];
+  for (const photo of audit?.generalPhotos || []) if (photo.dataUrl) photos.push({ ...photo, label: "Vista general" });
+  for (const answer of audit?.answers || []) {
+    const q = QUESTIONS.find((item) => item.id === Number(answer.questionId));
+    for (const photo of answer.photos || []) if (photo.dataUrl) photos.push({ ...photo, label: q ? `${q.id}. ${q.title}` : "Evidencia" });
+  }
+  return photos;
+}
+
+async function loadTourAudit(index) {
+  const audits = latestAuditsInAreaOrder();
+  if (!audits.length) return;
+  state.tourLoading = true;
+  state.tourIndex = Math.max(0, Math.min(index, audits.length - 1));
+  state.tourPhotoIndex = 0;
+  render();
+  state.tourAudit = await loadCloudPhotos(audits[state.tourIndex]);
+  state.tourLoading = false;
+  render();
+}
+
+async function startVisualTour(fullscreen = false) {
+  if (fullscreen && document.documentElement.requestFullscreen) {
+    try { await document.documentElement.requestFullscreen(); } catch (error) { console.warn("Pantalla completa", error); }
+  }
+  state.tourMode = true;
+  state.selectedAudit = null;
+  await loadTourAudit(0);
+}
+
+async function changeTourArea(delta) {
+  const audits = latestAuditsInAreaOrder();
+  const next = state.tourIndex + delta;
+  if (next < 0 || next >= audits.length) return;
+  await loadTourAudit(next);
+}
+
+function renderTour() {
+  document.body.classList.add("tour-active");
+  const audits = latestAuditsInAreaOrder();
+  if (state.tourLoading || !state.tourAudit) {
+    app.innerHTML = `<main class="tour-shell"><section class="tour-loading"><span class="loader"></span><h1>Preparando recorrido visual…</h1></section></main>`;
+    return;
+  }
+  const audit = state.tourAudit;
+  const photos = tourPhotos(audit);
+  const currentPhoto = photos[state.tourPhotoIndex] || null;
+  const planMap = new Map((audit.plan || []).map((item) => [Number(item.questionId), item]));
+  const answerMap = new Map((audit.answers || []).map((answer) => [Number(answer.questionId), answer]));
+  const questions = QUESTIONS.map((q) => {
+    const answer = answerMap.get(q.id) || {};
+    const plan = planMap.get(q.id);
+    return `<article class="tour-question-row"><div><span>${q.id}</span><div><strong>${escapeHtml(q.title)}</strong><small>${escapeHtml(answer.observation || plan?.finding || "Sin observaciones adicionales")}</small></div></div><b>${answer.score || "—"}/5</b></article>`;
+  }).join("");
+  const recommendations = (audit.plan || []).filter((item) => Number(item.score) < 5).slice(0, 5).flatMap((item) => (item.actions || []).slice(0, 1).map((action) => `<li><strong>${escapeHtml(item.title)}:</strong> ${escapeHtml(action)}</li>`)).join("");
+  const thumbStrip = photos.map((photo, index) => `<button class="tour-thumb ${index === state.tourPhotoIndex ? "active" : ""}" data-tour-photo="${index}"><img src="${photo.dataUrl}" alt="${escapeHtml(photo.label)}"><span>${escapeHtml(photo.label)}</span></button>`).join("");
+  const level = resultLevel(audit.result);
+  app.innerHTML = `<main class="tour-shell">
+    <header class="tour-topbar"><div class="tour-brand"><img src="./logo-mps-header.png" alt="MPS"><div><strong>Recorrido Visual 5S</strong><span>${state.tourIndex + 1} de ${audits.length} áreas con auditoría</span></div></div><div class="tour-top-actions"><button data-action="toggle-fullscreen">⛶ Pantalla completa</button><button data-action="close-tour">✕ Salir</button></div></header>
+    <section class="tour-stage"><div class="tour-photo-stage">${currentPhoto ? `<img src="${currentPhoto.dataUrl}" alt="${escapeHtml(currentPhoto.label)}"><div class="tour-photo-caption"><span>${escapeHtml(currentPhoto.label)}</span><strong>${state.tourPhotoIndex + 1} / ${photos.length}</strong></div>` : `<div class="tour-no-photo"><b>▧</b><h2>Sin fotografías cargadas</h2><p>La auditoría sí puede presentarse con sus calificaciones y recomendaciones.</p></div>`}${photos.length > 1 ? `<button class="tour-photo-nav prev" data-action="tour-photo-prev">‹</button><button class="tour-photo-nav next" data-action="tour-photo-next">›</button>` : ""}</div>
+      <aside class="tour-summary"><span class="tour-area-counter">Área ${state.tourIndex + 1}</span><h1>${escapeHtml(audit.area.full)}</h1><div class="tour-score ${level.tone}"><strong>${audit.result}%</strong><span>${level.label}</span></div><p>${formatDate(audit.completedAt || audit.createdAt)} · ${escapeHtml(audit.auditor)}</p>${audit.generalObservation ? `<div class="tour-observation"><strong>Comentario general</strong><p>${escapeHtml(audit.generalObservation)}</p></div>` : ""}<div class="tour-recommendations"><strong>Sugerencias principales</strong>${recommendations ? `<ul>${recommendations}</ul>` : `<p>El área mantiene resultados sólidos. Continuar sosteniendo los estándares.</p>`}</div></aside>
+    </section>
+    ${photos.length ? `<div class="tour-thumbs">${thumbStrip}</div>` : ""}
+    <section class="tour-questions"><div class="tour-section-title"><div><span>Evaluación completa</span><h2>Las 10 preguntas</h2></div><p>Calificación, observación y retroalimentación por criterio.</p></div><div class="tour-question-list">${questions}</div></section>
+    <footer class="tour-footer"><button class="secondary-button" data-action="tour-prev" ${state.tourIndex === 0 ? "disabled" : ""}>‹ Área anterior</button><div class="tour-dots">${audits.map((item, index) => `<button data-tour-area="${index}" class="${index === state.tourIndex ? "active" : ""}" aria-label="${escapeHtml(item.area.short)}"></button>`).join("")}</div><button class="primary-button" data-action="tour-next" ${state.tourIndex === audits.length - 1 ? "disabled" : ""}>Siguiente área ›</button></footer>
+  </main>`;
+}
+
 function render() {
   if (state.publicMode) return renderPublicPortal();
-  document.body.classList.remove("public-mode");
+  if (state.tourMode) return renderTour();
+  document.body.classList.remove("public-mode", "tour-active");
   if (state.loading || !state.authReady) return;
   if (state.selectedAudit) return renderDetail();
   if (state.draft && state.summary) return renderSummary();
@@ -1202,9 +1336,15 @@ async function publishEvidence() {
       previous: previous ? { publicId: previous.publicId, result: previous.result, completedAt: previous.completedAt || previous.createdAt } : null,
       publishedAt: new Date().toISOString(),
       createdBy: state.user.uid,
-      version: "1.4"
+      version: "1.5"
     };
     await publicRef.set(publicDoc, { merge: true });
+    await cloudDb.collection("publicAreas").doc(audit.area.id).set({
+      areaId: audit.area.id,
+      publicId,
+      completedAt: publicDoc.completedAt,
+      updatedAt: publicDoc.publishedAt
+    }, { merge: true });
 
     const photos = [];
     for (const answer of audit.answers || []) {
@@ -1245,6 +1385,29 @@ async function copyPublicLink() {
     document.execCommand("copy");
     alert("Enlace copiado.");
   }
+}
+
+async function copyPublicDirectory() {
+  const url = publicDirectoryUrl();
+  try {
+    await navigator.clipboard.writeText(url);
+    alert("Enlace general copiado.");
+  } catch {
+    prompt("Copia este enlace:", url);
+  }
+}
+
+function openPublicDirectory() {
+  window.open(publicDirectoryUrl(), "_blank", "noopener");
+}
+
+function downloadMasterQr() {
+  const canvas = document.getElementById("masterQrCanvas");
+  if (!canvas) return;
+  const link = document.createElement("a");
+  link.href = canvas.toDataURL("image/png");
+  link.download = "QR-General-Resultados-5S-MPS.png";
+  link.click();
 }
 
 function downloadQr() {
@@ -1391,6 +1554,21 @@ app.addEventListener("click", async (event) => {
     return;
   }
 
+  if (state.tourMode) {
+    const areaDot = event.target.closest("[data-tour-area]");
+    if (areaDot) { await loadTourAudit(Number(areaDot.dataset.tourArea)); return; }
+    const photoButton = event.target.closest("[data-tour-photo]");
+    if (photoButton) { state.tourPhotoIndex = Number(photoButton.dataset.tourPhoto); render(); return; }
+    const tourAction = event.target.closest("[data-action]")?.dataset.action;
+    if (tourAction === "close-tour") { state.tourMode = false; state.tourAudit = null; if (document.fullscreenElement) await document.exitFullscreen().catch(() => {}); render(); return; }
+    if (tourAction === "toggle-fullscreen") { if (document.fullscreenElement) await document.exitFullscreen().catch(() => {}); else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen().catch(() => {}); return; }
+    if (tourAction === "tour-prev") { await changeTourArea(-1); return; }
+    if (tourAction === "tour-next") { await changeTourArea(1); return; }
+    if (tourAction === "tour-photo-prev") { const photos = tourPhotos(state.tourAudit); state.tourPhotoIndex = (state.tourPhotoIndex - 1 + photos.length) % photos.length; render(); return; }
+    if (tourAction === "tour-photo-next") { const photos = tourPhotos(state.tourAudit); state.tourPhotoIndex = (state.tourPhotoIndex + 1) % photos.length; render(); return; }
+    return;
+  }
+
   const areaButton = event.target.closest("[data-area]");
   if (areaButton) return startAudit(areaButton.dataset.area);
   const scoreButton = event.target.closest("[data-score]");
@@ -1448,6 +1626,11 @@ app.addEventListener("click", async (event) => {
   if (action === "publish-evidence") return publishEvidence();
   if (action === "copy-public-link") return copyPublicLink();
   if (action === "download-qr") return downloadQr();
+  if (action === "start-tour") return startVisualTour(false);
+  if (action === "start-tour-fullscreen") return startVisualTour(true);
+  if (action === "open-public-directory") return openPublicDirectory();
+  if (action === "copy-public-directory") return copyPublicDirectory();
+  if (action === "download-master-qr") return downloadMasterQr();
   if (action === "back") {
     if (state.selectedAudit) state.selectedAudit = null;
     else if (state.summary) { state.summary = false; state.draft.stage = "general"; }
