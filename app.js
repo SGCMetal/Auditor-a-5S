@@ -17,6 +17,20 @@ const AREAS = [
   { id: "quimicos", short: "Almacén de Químicos", full: "Almacén de Químicos", icon: "⚗" }
 ];
 
+const BOARD_AREA_COLORS = {
+  "almacen-mp-lab": "#f3263f",
+  "inspeccion-produccion": "#258bd1",
+  "linea-5": "#15783a",
+  "quimicos": "#b17300",
+  "consumibles": "#ef7800",
+  "oficinas": "#9226ad",
+  "almacen-pc": "#cc2d31",
+  "lineas-1-2": "#1c9c91",
+  "linea-3-enrackado": "#5e5e5e",
+  "inspeccion-empaque": "#9a6100",
+  "mantenimiento": "#3d51b5"
+};
+
 const QUESTIONS = [
   {
     id: 1,
@@ -483,10 +497,11 @@ async function initPublicPortal() {
     state.publicPhotos = photoSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
     try {
       const taskSnapshot = await ref.collection("tasks").orderBy("order", "asc").get();
-      state.publicTasks = taskSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+      const cloudTasks = taskSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+      state.publicTasks = mergePublicTasks(state.publicData.plan || [], cloudTasks);
     } catch (taskError) {
-      console.warn("No se pudieron cargar las tareas", taskError);
-      state.publicTasks = [];
+      console.warn("No se pudieron cargar las tareas; se generarán desde el plan publicado", taskError);
+      state.publicTasks = mergePublicTasks(state.publicData.plan || [], []);
     }
 
     if (state.publicData.previous?.publicId) {
@@ -633,6 +648,48 @@ function boardLevel(result) {
   if (n >= 75) return { label: "BUENO", tone: "good", light: "🟡" };
   if (n >= 60) return { label: "REGULAR", tone: "warn", light: "🟠" };
   return { label: "DEFICIENTE", tone: "bad", light: "🔴" };
+}
+
+function taskActionHash(value) {
+  let hash = 2166136261;
+  const text = String(value || "");
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function derivedTasksFromPlan(plan = []) {
+  const tasks = [];
+  for (const item of (plan || []).filter((planItem) => Number(planItem.score) < 5)) {
+    (item.actions || []).filter(Boolean).slice(0, 5).forEach((action, actionIndex) => {
+      tasks.push({
+        id: `q${Number(item.questionId)}-a${actionIndex + 1}-${taskActionHash(action)}`,
+        questionId: Number(item.questionId),
+        questionTitle: item.title || `Pregunta ${item.questionId}`,
+        score: Number(item.score),
+        targetScore: Math.min(5, Number(item.score) + 1),
+        priority: item.priority || (Number(item.score) <= 2 ? "Alta" : Number(item.score) === 3 ? "Media" : "Baja"),
+        action,
+        order: Number(item.questionId) * 100 + actionIndex,
+        sourceAuditId: state.publicData?.auditId || null,
+        done: false,
+        completedAt: null,
+        completedBy: null,
+        _persisted: false
+      });
+    });
+  }
+  return tasks.sort((a, b) => a.order - b.order);
+}
+
+function mergePublicTasks(plan = [], cloudTasks = []) {
+  const cloudMap = new Map((cloudTasks || []).map((task) => [task.id, task]));
+  return derivedTasksFromPlan(plan).map((task) => {
+    const saved = cloudMap.get(task.id);
+    return saved ? { ...task, ...saved, _persisted: true } : task;
+  });
 }
 
 function weeklySnapshots() {
@@ -945,31 +1002,60 @@ function publicHeader(detail = false) {
 }
 
 function renderPublicDirectory() {
-  const available = AREAS.map((area) => ({ area, published: state.publicAreas[area.id] })).filter((item) => item.published?.publicId && Number.isFinite(Number(item.published.result)));
+  const allPublished = AREAS.map((area) => ({ area, published: state.publicAreas[area.id] }))
+    .filter((item) => item.published?.publicId && Number.isFinite(Number(item.published.result)));
+  const newestWeek = allPublished.map((item) => item.published.weekKey || (item.published.completedAt ? weekKey(item.published.completedAt) : null)).filter(Boolean).sort().at(-1) || null;
+  const available = allPublished.filter((item) => (item.published.weekKey || weekKey(item.published.completedAt)) === newestWeek);
+  const availableMap = new Map(available.map((item) => [item.area.id, item]));
   const average = available.length ? Math.round(available.reduce((sum, item) => sum + Number(item.published.result), 0) / available.length) : 0;
   const atGoal = available.filter((item) => Number(item.published.result) >= 80).length;
   const critical = available.filter((item) => Number(item.published.result) <= 60).length;
-  const newest = available.map((item) => item.published.completedAt).filter(Boolean).sort().at(-1);
-  const currentWeek = newest ? weekKey(newest) : null;
   const best = available.slice().sort((a,b) => Number(b.published.result)-Number(a.published.result))[0];
-  const rows = AREAS.map((area, index) => {
-    const published = state.publicAreas[area.id];
-    if (!published?.publicId || !Number.isFinite(Number(published.result))) {
-      return `<div class="public-board-row empty"><span>${index + 1}</span><div><strong>${escapeHtml(area.short)}</strong><small>Sin evaluación publicada</small></div><b>—</b><i>—</i></div>`;
+  const sortedAreas = [...AREAS].sort((a,b) => {
+    const ar = availableMap.get(a.id)?.published?.result;
+    const br = availableMap.get(b.id)?.published?.result;
+    if (ar == null && br == null) return AREAS.findIndex(x => x.id === a.id) - AREAS.findIndex(x => x.id === b.id);
+    if (ar == null) return 1;
+    if (br == null) return -1;
+    return Number(br) - Number(ar) || AREAS.findIndex(x => x.id === a.id) - AREAS.findIndex(x => x.id === b.id);
+  });
+  const rows = sortedAreas.map((area, index) => {
+    const current = availableMap.get(area.id)?.published;
+    const areaColor = BOARD_AREA_COLORS[area.id] || "#1d5f91";
+    if (!current) {
+      return `<div class="classic-board-row pending"><div class="rank-cell">${index + 1}</div><div class="area-cell" style="--area-color:${areaColor}">${escapeHtml(area.full)}</div><div class="score-cell">—</div><div class="advance-cell"><div class="advance-blocks">${Array.from({length:10},()=>'<i></i>').join('')}</div></div><div class="level-cell">PENDIENTE</div><div class="light-cell"><span class="status-light pending"></span></div></div>`;
     }
-    const result = Number(published.result);
+    const result = Number(current.result);
     const level = boardLevel(result);
-    const delta = Number.isFinite(Number(published.previousResult)) ? result - Number(published.previousResult) : null;
-    const deltaText = delta == null ? "" : delta > 0 ? `↑ ${delta} pts` : delta < 0 ? `↓ ${Math.abs(delta)} pts` : "= sin cambio";
-    return `<a class="public-board-row ${level.tone}" href="${escapeHtml(publicUrlFor(published.publicId))}"><span>${index + 1}</span><div><strong>${escapeHtml(area.short)}</strong><small>${deltaText || "Ver evidencias y plan de mejora"}</small></div><b>${result}%</b><i>${level.light} ${level.label}</i><em>›</em></a>`;
+    const filled = Math.max(0, Math.min(10, Math.round(result / 10)));
+    const blocks = Array.from({length:10},(_,i)=>`<i class="${i < filled ? 'filled' : ''}"></i>`).join('');
+    return `<a class="classic-board-row" href="${escapeHtml(publicUrlFor(current.publicId))}"><div class="rank-cell">${index + 1}</div><div class="area-cell" style="--area-color:${areaColor}">${escapeHtml(area.full)}</div><div class="score-cell">${result}%</div><div class="advance-cell"><div class="advance-blocks">${blocks}</div></div><div class="level-cell">${level.label}</div><div class="light-cell"><span class="status-light ${level.tone}" title="${level.label}"></span></div></a>`;
   }).join("");
-  app.innerHTML = `${publicHeader(false)}<main class="public-page public-directory-page board-page">
-    <section class="public-board-hero"><div><p class="eyebrow">TABLERO DE RESULTADOS 5S POR ÁREA</p><h1>${currentWeek ? escapeHtml(weekLabel(currentWeek)) : "Resultados más recientes"}</h1><p>Selecciona cualquier área para consultar fotografías, comentarios, recomendaciones y su libro de trabajo 5S.</p></div><div class="goal-badge">★ META<br><strong>80%</strong></div></section>
-    <section class="board-summary"><article><span>Prom. planta</span><strong>${available.length ? `${average}%` : "—"}</strong></article><article><span>Áreas ≥80%</span><strong>${atGoal}</strong></article><article><span>Áreas críticas ≤60%</span><strong>${critical}</strong></article><article><span>Mejor área</span><strong>${best ? escapeHtml(best.area.short) : "—"}</strong></article></section>
-    <section class="public-board"><div class="public-board-head"><span>#</span><b>Área</b><b>% Cumpl.</b><b>Nivel</b></div>${rows}</section>
-    <section class="board-legend"><span>🟡 BUENO ≥75%</span><span>🟠 REGULAR 60–74%</span><span>🔴 DEFICIENTE &lt;60%</span><strong>Meta formal de cada área: 80%</strong></section>
-    <footer class="public-footer">ORDEN · LIMPIEZA · DISCIPLINA · ESTANDARIZACIÓN · MEJORA CONTINUA</footer></main>`;
+  const complete = available.length === AREAS.length;
+  app.innerHTML = `${publicHeader(false)}<main class="public-page board-page classic-board-page">
+    <section class="classic-board">
+      <div class="classic-board-title-row"><div class="classic-board-logo"><img src="${MPS_LOGO_DATA_URI}" alt="MPS"></div><div class="classic-board-title"><h1>TABLERO DE RESULTADOS 5S POR ÁREA</h1><p>Resultados de auditoría · ${newestWeek ? escapeHtml(weekLabel(newestWeek)) : "Sin semana publicada"}</p></div><div class="classic-board-qr"><canvas id="publicBoardQrCanvas" aria-label="QR fijo de Resultados 5S"></canvas></div></div>
+      <div class="classic-goal">★ &nbsp; META: 80% &nbsp; ★</div>
+      <div class="classic-board-head"><span>#</span><b>ÁREA</b><b>% CUMPL.</b><b>AVANCE&nbsp; (META 80%)</b><b>NIVEL</b><b>SEMÁFORO</b></div>
+      <div class="classic-board-body">${rows}</div>
+      <div class="classic-summary-grid">
+        <section class="classic-summary-panel"><h3>RESUMEN GENERAL</h3><dl><div><dt>Prom. planta:</dt><dd>${available.length ? `${average}%` : "—"}</dd></div><div><dt>Áreas ≥ 80%:</dt><dd>${atGoal}</dd></div><div><dt>Áreas críticas (≤60%):</dt><dd>${critical}</dd></div><div><dt>Mejor área:</dt><dd>${best ? escapeHtml(best.area.short) : "—"}</dd></div><div><dt>Meta global:</dt><dd>80%</dd></div></dl><div class="process-status ${complete ? 'complete' : ''}">● ${complete ? "SEMANA COMPLETA" : "EN PROCESO"}</div></section>
+        <section class="classic-legend-panel"><h3>LEYENDA</h3><p><span class="legend-dot good"></span><b>BUENO</b> — Cumplimiento igual o mayor a 75%</p><p><span class="legend-dot warn"></span><b>REGULAR</b> — Cumplimiento entre 60% y 74%</p><p><span class="legend-dot bad"></span><b>DEFICIENTE</b> — Cumplimiento menor a 60%</p><p><b>Meta global de cada área: 80%</b></p><em>El nivel BUENO comienza en 75%; alcanzar 80% o más significa cumplir la meta formal.</em></section>
+        <section class="classic-message-panel"><h3>MENSAJE</h3><div><b>★<br>¡Cada acción cuenta!</b><p>Mantengamos el compromiso con las 5S y superemos nuestra meta juntos.</p></div></section>
+      </div>
+      <div class="classic-board-footer">ORDEN &nbsp; • &nbsp; LIMPIEZA &nbsp; • &nbsp; DISCIPLINA &nbsp; • &nbsp; ESTANDARIZACIÓN &nbsp; • &nbsp; MEJORA CONTINUA</div>
+    </section>
+    <p class="board-public-help">Toca cualquier área para consultar las 10 preguntas, fotografías, comentarios y el Libro de trabajo 5S.</p>
+  </main>`;
+  requestAnimationFrame(drawPublicBoardQr);
 }
+
+function drawPublicBoardQr() {
+  const canvas = document.getElementById("publicBoardQrCanvas");
+  if (!canvas || !window.MPS_QR) return;
+  window.MPS_QR.drawCanvas(canvas, publicDirectoryUrl(), { size: 180, dark: "#082b63", level: "M" });
+}
+
 function renderPublicPortal() {
   document.body.classList.add("public-mode");
   if (state.publicLoading) {
@@ -995,7 +1081,8 @@ function renderPublicPortal() {
     const answer = answerMap.get(q.id) || { questionId: q.id, score: "—", criterion: "Sin registro", observation: "", photoCount: 0 };
     const photos = (byQuestion.get(q.id) || []).map((photo) => `<img src="${photo.dataUrl}" alt="Evidencia de ${escapeHtml(q.title)}">`).join("");
     const plan = planMap.get(q.id);
-    return `<article class="public-evidence-card"><div class="public-card-heading"><div><span class="question-chip">Pregunta ${q.id} de 10</span><h2>${escapeHtml(q.title)}</h2></div><div class="mini-score">${answer.score}/5</div></div><p class="public-question">${escapeHtml(q.question)}</p><div class="criterion-public"><strong>Criterio aplicado</strong><span>${escapeHtml(answer.criterion || "Sin criterio registrado")}</span></div>${answer.observation ? `<p><strong>Observación del recorrido:</strong> ${escapeHtml(answer.observation)}</p>` : `<p class="muted-inline">Sin observaciones adicionales.</p>`}${plan?.finding ? `<p><strong>Análisis / retroalimentación:</strong> ${escapeHtml(plan.finding)}</p>` : ""}${photos ? `<div class="public-photo-grid">${photos}</div>` : `<div class="no-photo-note">Sin fotografías asociadas a esta pregunta.</div>`}${plan?.actions?.length ? `<div class="public-recommendations"><strong>Para mejorar el resultado</strong><ul>${plan.actions.map((action) => `<li>${escapeHtml(action)}</li>`).join("")}</ul></div>` : ""}</article>`;
+    const improveBlock = plan?.actions?.length && Number(answer.score) < 5 ? `<section class="public-improve-now"><div class="improve-now-heading"><div><span>ACCIONES PARA MEJORAR ESTA CALIFICACIÓN</span><strong>Esto es lo que el área debe hacer antes de la siguiente auditoría</strong></div><b>${answer.score}/5 → ${Math.min(5, Number(answer.score) + 1)}/5</b></div><ol>${plan.actions.map((action) => `<li>${escapeHtml(action)}</li>`).join("")}</ol><p>Estas acciones también están reunidas al final en el <b>Libro de trabajo 5S</b>, donde pueden marcarse como realizadas.</p></section>` : Number(answer.score) === 5 ? `<section class="public-maintain-standard"><b>✓ Estándar alcanzado</b><span>Mantener las condiciones actuales para conservar 5/5.</span></section>` : "";
+    return `<article class="public-evidence-card"><div class="public-card-heading"><div><span class="question-chip">Pregunta ${q.id} de 10</span><h2>${escapeHtml(q.title)}</h2></div><div class="mini-score">${answer.score}/5</div></div><p class="public-question">${escapeHtml(q.question)}</p><div class="criterion-public"><strong>Criterio aplicado</strong><span>${escapeHtml(answer.criterion || "Sin criterio registrado")}</span></div>${answer.observation ? `<p><strong>Observación del recorrido:</strong> ${escapeHtml(answer.observation)}</p>` : `<p class="muted-inline">Sin observaciones adicionales.</p>`}${plan?.finding ? `<p><strong>Análisis / retroalimentación:</strong> ${escapeHtml(plan.finding)}</p>` : ""}${photos ? `<div class="public-photo-grid">${photos}</div>` : `<div class="no-photo-note">Sin fotografías asociadas a esta pregunta.</div>`}${improveBlock}</article>`;
   }).join("");
 
   const generalPhotos = general.map((photo) => `<img src="${photo.dataUrl}" alt="Vista general del área">`).join("");
@@ -1025,30 +1112,68 @@ function renderPublicPortal() {
 }
 
 function renderPublicTasks() {
-  const tasks = state.publicTasks || [];
-  if (!tasks.length) return `<div class="workbook-empty"><b>✓</b><div><strong>Sin tareas pendientes generadas</strong><p>Cuando existan oportunidades de mejora, aquí aparecerán acciones concretas para trabajar durante la semana.</p></div></div>`;
+  const tasks = (state.publicTasks?.length ? state.publicTasks : mergePublicTasks(state.publicData?.plan || [], [])) || [];
+  if (!tasks.length) return `<div class="workbook-empty"><b>✓</b><div><strong>No hay acciones de mejora pendientes</strong><p>Las preguntas publicadas están en 5/5 o no contienen recomendaciones. Si existe una recomendación visible arriba, vuelve a publicar la auditoría para actualizar el libro.</p></div></div>`;
   const done = tasks.filter((task) => task.done).length;
-  const items = tasks.map((task) => `<label class="workbook-task ${task.done ? "done" : ""}"><input type="checkbox" data-public-task="${escapeHtml(task.id)}" ${task.done ? "checked" : ""}><span class="task-check">✓</span><div><strong>${escapeHtml(task.action)}</strong><small>${escapeHtml(task.questionTitle || `Pregunta ${task.questionId}`)} · Calificación ${task.score}/5 → objetivo ${task.targetScore || Math.min(5, Number(task.score || 0) + 1)}/5</small></div></label>`).join("");
-  return `<div class="workbook-progress"><div><strong>${done} de ${tasks.length} realizadas</strong><span>Marca una tarea cuando el área la haya atendido. Es un apoyo de trabajo; no modifica la calificación vigente.</span></div><div class="workbook-progress-bar"><i style="width:${Math.round(done / tasks.length * 100)}%"></i></div></div><div class="workbook-list">${items}</div>`;
+  const percent = Math.round(done / tasks.length * 100);
+  const groups = new Map();
+  for (const task of tasks) {
+    const key = Number(task.questionId);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(task);
+  }
+  const groupMarkup = [...groups.entries()].sort((a,b)=>a[0]-b[0]).map(([questionId, group]) => {
+    const first = group[0];
+    const groupDone = group.filter((task) => task.done).length;
+    const priorityClass = String(first.priority || "Baja").toLowerCase();
+    const items = group.sort((a,b)=>a.order-b.order).map((task) => `<label class="workbook-task ${task.done ? "done" : ""}"><input type="checkbox" data-public-task="${escapeHtml(task.id)}" ${task.done ? "checked" : ""}><span class="task-check">✓</span><div><strong>${escapeHtml(task.action)}</strong><small>${task.done ? "Realizada" : "Pendiente"}</small></div></label>`).join("");
+    return `<section class="workbook-question-group priority-${priorityClass}"><header><div><span>Pregunta ${questionId}</span><h3>${escapeHtml(first.questionTitle || `Pregunta ${questionId}`)}</h3></div><div class="workbook-group-score"><b>${first.score}/5</b><small>Objetivo ${first.targetScore || Math.min(5, Number(first.score || 0) + 1)}/5</small></div></header><div class="workbook-group-meta"><span>${groupDone} de ${group.length} realizadas</span><span>Prioridad ${escapeHtml(first.priority || "Baja")}</span></div><div class="workbook-list">${items}</div></section>`;
+  }).join("");
+  return `<div class="workbook-intro"><div><span>PLAN DE TRABAJO DE ESTA SEMANA</span><strong>${done} de ${tasks.length} acciones realizadas</strong><p>Marca cada acción conforme el área la vaya atendiendo. El avance sirve como guía de trabajo y no modifica la calificación vigente.</p></div><b>${percent}%</b></div><div class="workbook-progress-bar large"><i style="width:${percent}%"></i></div><div class="workbook-groups">${groupMarkup}</div>`;
 }
 
 async function togglePublicTask(taskId, done) {
-  const task = state.publicTasks.find((item) => item.id === taskId);
-  if (!task || !cloudDb || !state.publicToken || !state.user) return;
+  const task = state.publicTasks.find((item) => item.id === taskId) || mergePublicTasks(state.publicData?.plan || [], []).find((item) => item.id === taskId);
+  if (!task || !cloudDb || !state.publicToken) return;
+  if (!state.user && cloudAuth) {
+    try {
+      const credential = await cloudAuth.signInAnonymously();
+      state.user = credential.user;
+    } catch (authError) {
+      alert("No fue posible iniciar la sesión anónima para guardar el avance.");
+      return;
+    }
+  }
   task.done = done;
   task.completedAt = done ? new Date().toISOString() : null;
+  if (!state.publicTasks.some((item) => item.id === task.id)) state.publicTasks.push(task);
   render();
   try {
-    await cloudDb.collection("publicAudits").doc(state.publicToken).collection("tasks").doc(taskId).update({
-      done,
-      completedAt: task.completedAt,
-      completedBy: state.user.uid
-    });
+    const taskRef = cloudDb.collection("publicAudits").doc(state.publicToken).collection("tasks").doc(taskId);
+    if (task._persisted) {
+      await taskRef.update({
+        done,
+        completedAt: task.completedAt,
+        completedBy: state.user?.uid || null
+      });
+    } else {
+      const { _persisted, ...taskData } = task;
+      await taskRef.set({
+        ...taskData,
+        done,
+        completedAt: task.completedAt,
+        completedBy: state.user?.uid || null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+      task._persisted = true;
+    }
   } catch (error) {
     console.error("Actualización de tarea", error);
     task.done = !done;
+    task.completedAt = task.done ? task.completedAt : null;
     render();
-    alert("No fue posible actualizar la tarea. Intenta nuevamente.");
+    alert("No fue posible actualizar la tarea. Verifica la conexión e intenta nuevamente.");
   }
 }
 
@@ -1482,7 +1607,7 @@ async function publishEvidence() {
       previous: previous ? { publicId: previous.publicId, result: previous.result, completedAt: previous.completedAt || previous.createdAt } : null,
       publishedAt: new Date().toISOString(),
       createdBy: state.user.uid,
-      version: "1.6"
+      version: "1.6.1"
     };
     await publicRef.set(publicDoc, { merge: true });
     await cloudDb.collection("publicAreas").doc(audit.area.id).set({
@@ -1504,24 +1629,13 @@ async function publishEvidence() {
       await Promise.all(photos.slice(i, i + 8).map(({ photo, kind, questionId, order }) => publicRef.collection("photos").doc(photo.id).set({ id: photo.id, kind, questionId, order, dataUrl: photo.dataUrl, createdAt: photo.createdAt || new Date().toISOString() }, { merge: true })));
     }
 
-    const workbookTasks = [];
-    for (const item of (audit.plan || []).filter((planItem) => Number(planItem.score) < 5)) {
-      (item.actions || []).slice(0, 3).forEach((action, actionIndex) => workbookTasks.push({
-        id: `q${item.questionId}-a${actionIndex + 1}`,
-        questionId: Number(item.questionId),
-        questionTitle: item.title,
-        score: Number(item.score),
-        targetScore: Math.min(5, Number(item.score) + 1),
-        action,
-        order: Number(item.questionId) * 10 + actionIndex,
-        sourceAuditId: audit.id
-      }));
-    }
+    const workbookTasks = derivedTasksFromPlan(audit.plan || []).map((task) => ({ ...task, sourceAuditId: audit.id }));
     await Promise.all(workbookTasks.map(async (task) => {
       const taskRef = publicRef.collection("tasks").doc(task.id);
       const current = await taskRef.get();
-      if (current.exists) return taskRef.set({ ...task, updatedAt: new Date().toISOString() }, { merge: true });
-      return taskRef.set({ ...task, done: false, completedAt: null, completedBy: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+      if (current.exists) return;
+      const { _persisted, ...taskData } = task;
+      return taskRef.set({ ...taskData, done: false, completedAt: null, completedBy: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     }));
 
     audit = { ...audit, publicId, publicUrl, publishedAt: publicDoc.publishedAt };
