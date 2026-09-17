@@ -245,6 +245,7 @@ const state = {
   publicPhotos: [],
   publicPreviousData: null,
   publicPreviousPhotos: [],
+  publicTasks: [],
   publicLoading: Boolean(PUBLIC_TOKEN) || PUBLIC_DIRECTORY,
   publicError: "",
   improvementOpen: false,
@@ -255,7 +256,8 @@ const state = {
   tourAudit: null,
   tourIndex: 0,
   tourPhotoIndex: 0,
-  tourLoading: false
+  tourLoading: false,
+  dashboardWeekKey: null
 };
 
 const app = document.getElementById("app");
@@ -447,7 +449,21 @@ async function initPublicPortal() {
       const areaDocs = await Promise.all(AREAS.map(async (area) => {
         try {
           const doc = await cloudDb.collection("publicAreas").doc(area.id).get();
-          return [area.id, doc.exists ? doc.data() : null];
+          if (!doc.exists) return [area.id, null];
+          const published = doc.data();
+          let result = published.result;
+          let previousResult = published.previousResult;
+          let completedAt = published.completedAt;
+          if (published.publicId && (result == null || previousResult == null)) {
+            const auditDoc = await cloudDb.collection("publicAudits").doc(published.publicId).get();
+            if (auditDoc.exists) {
+              const auditData = auditDoc.data();
+              result = auditData.result;
+              previousResult = auditData.previous?.result ?? null;
+              completedAt = auditData.completedAt || completedAt;
+            }
+          }
+          return [area.id, { ...published, result, previousResult, completedAt }];
         } catch (error) {
           console.warn(`No se pudo cargar el área ${area.id}`, error);
           return [area.id, null];
@@ -465,6 +481,13 @@ async function initPublicPortal() {
     if (!auditDoc.exists) throw new Error("No se encontró la auditoría asociada con este enlace.");
     state.publicData = { id: auditDoc.id, ...auditDoc.data() };
     state.publicPhotos = photoSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    try {
+      const taskSnapshot = await ref.collection("tasks").orderBy("order", "asc").get();
+      state.publicTasks = taskSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    } catch (taskError) {
+      console.warn("No se pudieron cargar las tareas", taskError);
+      state.publicTasks = [];
+    }
 
     if (state.publicData.previous?.publicId) {
       try {
@@ -565,6 +588,65 @@ function calculateResult(answers) {
   const valid = (answers || []).filter((item) => item.score);
   if (!valid.length) return 0;
   return Math.round(valid.reduce((sum, item) => sum + Number(item.score), 0) / (valid.length * 5) * 100);
+}
+
+function weekKey(value) {
+  const date = new Date(value || Date.now());
+  const local = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const day = (local.getDay() + 6) % 7;
+  local.setDate(local.getDate() - day);
+  const yearStart = new Date(local.getFullYear(), 0, 1);
+  const firstMondayOffset = (8 - yearStart.getDay()) % 7;
+  const firstMonday = new Date(local.getFullYear(), 0, 1 + firstMondayOffset);
+  let year = local.getFullYear();
+  if (local < firstMonday) {
+    year -= 1;
+    const prevStart = new Date(year, 0, 1);
+    const prevOffset = (8 - prevStart.getDay()) % 7;
+    const prevMonday = new Date(year, 0, 1 + prevOffset);
+    return `${year}-W${String(Math.floor((local - prevMonday) / 604800000) + 1).padStart(2, "0")}`;
+  }
+  return `${year}-W${String(Math.floor((local - firstMonday) / 604800000) + 1).padStart(2, "0")}`;
+}
+
+function weekRangeForKey(key) {
+  const match = String(key || "").match(/^(\d{4})-W(\d{2})$/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const week = Number(match[2]);
+  const yearStart = new Date(year, 0, 1);
+  const offset = (8 - yearStart.getDay()) % 7;
+  const monday = new Date(year, 0, 1 + offset + (week - 1) * 7);
+  const sunday = new Date(monday); sunday.setDate(monday.getDate() + 6);
+  return { monday, sunday };
+}
+
+function weekLabel(key) {
+  const range = weekRangeForKey(key);
+  if (!range) return "Semana sin fecha";
+  const f = (d) => d.toLocaleDateString("es-MX", { day: "2-digit", month: "short" });
+  return `Semana del ${f(range.monday)} al ${f(range.sunday)} de ${range.sunday.getFullYear()}`;
+}
+
+function boardLevel(result) {
+  const n = Number(result);
+  if (n >= 75) return { label: "BUENO", tone: "good", light: "🟡" };
+  if (n >= 60) return { label: "REGULAR", tone: "warn", light: "🟠" };
+  return { label: "DEFICIENTE", tone: "bad", light: "🔴" };
+}
+
+function weeklySnapshots() {
+  const groups = new Map();
+  for (const audit of state.audits) {
+    const key = weekKey(audit.completedAt || audit.createdAt);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(audit);
+  }
+  return [...groups.entries()].map(([key, audits]) => {
+    const latestByArea = AREAS.map((area) => audits.filter((a) => a.area.id === area.id).sort(sortAudits)[0]).filter(Boolean);
+    const average = latestByArea.length ? Math.round(latestByArea.reduce((sum, a) => sum + Number(a.result || 0), 0) / latestByArea.length) : 0;
+    return { key, audits: latestByArea, average, areaCount: latestByArea.length };
+  }).sort((a, b) => b.key.localeCompare(a.key));
 }
 
 function resultLevel(result) {
@@ -772,10 +854,13 @@ function renderHistory() {
     const publicMark = audit.publicId ? " · QR publicado" : "";
     return `<button class="audit-list-card" data-audit="${audit.id}"><div class="audit-list-icon">▥</div><div><strong>${escapeHtml(audit.area.short)}</strong><span>${formatDate(audit.completedAt || audit.createdAt)} · ${escapeHtml(audit.auditor)}</span><small>${(audit.plan || []).filter((item) => item.score < 5).length} recomendaciones${sync}${publicMark}</small></div><div class="audit-result ${level.tone}"><strong>${audit.result}%</strong><b>›</b></div></button>`;
   }).join("");
-  app.innerHTML = `${header("Historial 5S", "Resultados, evidencias y códigos QR")}<main class="page page-with-nav"><div class="history-actions"><div><p class="eyebrow">Consulta y seguimiento</p><h1>Resultados por área</h1></div><button class="export-button" data-action="export" ${state.audits.length ? "" : "disabled"}>▣ Excel</button></div>
+  const weekly = weeklySnapshots();
+  const weekCards = weekly.map((snapshot) => `<button class="weekly-history-card" data-week="${snapshot.key}"><div><span>${escapeHtml(weekLabel(snapshot.key))}</span><strong>${snapshot.average}% promedio</strong><small>${snapshot.areaCount} de ${AREAS.length} áreas con resultado</small></div><b>Ver tablero ›</b></button>`).join("");
+  app.innerHTML = `${header("Historial 5S", "Auditorías y tableros semanales")}<main class="page page-with-nav"><div class="history-actions"><div><p class="eyebrow">Consulta y seguimiento</p><h1>Historial semanal</h1></div><button class="export-button" data-action="export" ${state.audits.length ? "" : "disabled"}>▣ Excel</button></div>
+    ${weekly.length ? `<div class="section-heading"><div><p class="eyebrow">Tableros guardados</p><h2>Resultados por semana</h2></div></div><div class="weekly-history-list">${weekCards}</div>` : ""}
+    <div class="section-heading"><div><p class="eyebrow">Auditorías individuales</p><h2>Detalle por área</h2></div></div>
     ${state.audits.length ? `<div class="audit-list">${rows}</div>` : `<section class="empty-state"><b>◷</b><h2>Aún no hay auditorías</h2><p>Cuando se complete la primera, aquí aparecerán el resultado, las evidencias y el plan de mejora.</p></section>`}</main>${bottomNav()}`;
 }
-
 function evidenceCard(answer) {
   const q = QUESTIONS.find((item) => item.id === answer.questionId);
   const planItem = (state.selectedAudit?.plan || []).find((item) => item.questionId === answer.questionId);
@@ -816,7 +901,7 @@ function renderDetail() {
 }
 
 function renderMasterQrCard() {
-  return `<section class="master-qr-card"><div class="master-qr-visual"><canvas id="masterQrCanvas" aria-label="QR general de Resultados 5S"></canvas></div><div><p class="eyebrow">Un solo QR para todos los tableros</p><h2>Portal general de Resultados 5S</h2><p>Quien lo escanee verá primero las 11 áreas sin porcentajes. Al elegir un área, abrirá su auditoría publicada más reciente con las evidencias y recomendaciones.</p><div class="qr-actions"><button class="secondary-button" data-action="open-public-directory">Vista previa</button><button class="secondary-button" data-action="copy-public-directory">Copiar enlace</button><button class="primary-button" data-action="download-master-qr">Descargar QR general</button></div></div></section>`;
+  return `<section class="master-qr-card"><div class="master-qr-visual"><canvas id="masterQrCanvas" aria-label="QR general de Resultados 5S"></canvas></div><div><p class="eyebrow">Un solo QR para todos los tableros</p><h2>Portal general de Resultados 5S</h2><p>Quien lo escanee abrirá el tablero semanal de resultados. Desde cada área podrá consultar evidencias, comentarios, recomendaciones y marcar tareas del libro de trabajo 5S.</p><div class="qr-actions"><button class="secondary-button" data-action="open-public-directory">Vista previa</button><button class="secondary-button" data-action="copy-public-directory">Copiar enlace</button><button class="primary-button" data-action="download-master-qr">Descargar QR general</button></div></div></section>`;
 }
 
 function drawMasterQr() {
@@ -826,20 +911,25 @@ function drawMasterQr() {
 }
 
 function renderDashboard() {
-  const globalAverage = state.audits.length ? Math.round(state.audits.reduce((sum, item) => sum + item.result, 0) / state.audits.length) : 0;
+  const snapshots = weeklySnapshots();
+  const selectedKey = state.dashboardWeekKey && snapshots.some((item) => item.key === state.dashboardWeekKey) ? state.dashboardWeekKey : snapshots[0]?.key;
+  state.dashboardWeekKey = selectedKey || null;
+  const snapshot = snapshots.find((item) => item.key === selectedKey);
+  const weekAudits = snapshot?.audits || [];
+  const byArea = new Map(weekAudits.map((audit) => [audit.area.id, audit]));
   const rows = AREAS.map((area) => {
-    const areaAudits = state.audits.filter((audit) => audit.area.id === area.id);
-    const latest = areaAudits[0];
-    const average = areaAudits.length ? Math.round(areaAudits.reduce((sum, item) => sum + item.result, 0) / areaAudits.length) : null;
-    return `<div class="dashboard-row"><div><strong>${escapeHtml(area.short)}</strong><span>${latest ? `Último: ${latest.result}% · Promedio: ${average}%` : "Sin datos"}</span></div><div class="dashboard-bar"><div style="width:${latest?.result || 0}%"></div></div><strong class="dashboard-value">${latest ? `${latest.result}%` : "—"}</strong></div>`;
+    const latest = byArea.get(area.id);
+    const level = latest ? boardLevel(latest.result) : null;
+    return `<div class="dashboard-row ${level?.tone || ""}"><div><strong>${escapeHtml(area.short)}</strong><span>${latest ? `${formatDate(latest.completedAt || latest.createdAt)} · ${level.label}` : "Sin resultado en esta semana"}</span></div><div class="dashboard-bar"><div style="width:${latest?.result || 0}%"></div></div><strong class="dashboard-value">${latest ? `${latest.result}%` : "—"}</strong></div>`;
   }).join("");
-  app.innerHTML = `${header("Resultados 5S", "Vista general de las áreas")}<main class="page page-with-nav"><section class="dashboard-hero"><div><p class="eyebrow">Promedio registrado</p><h1>${globalAverage}%</h1><p>${state.audits.length ? `${state.audits.length} auditorías consideradas` : "Completa auditorías para comenzar a medir"}</p><div class="dashboard-hero-actions"><button class="tour-launch" data-action="start-tour" ${state.audits.length ? "" : "disabled"}>▶ Iniciar Recorrido Visual 5S</button><button class="tour-launch secondary" data-action="start-tour-fullscreen" ${state.audits.length ? "" : "disabled"}>⛶ Presentar en pantalla completa</button></div></div><b>▥</b></section>
-    <div class="section-heading"><div><p class="eyebrow">Presentación</p><h2>Recorrido visual por las áreas</h2></div></div><p class="dashboard-help">Avanza por las áreas en el orden del recorrido físico. Se mostrarán fotografías, resultado, observaciones, recomendaciones y las 10 preguntas evaluadas.</p>
+  const weekSelector = snapshots.map((item) => `<button class="week-chip ${item.key === selectedKey ? "active" : ""}" data-week="${item.key}">${escapeHtml(weekLabel(item.key))}</button>`).join("");
+  app.innerHTML = `${header("Resultados 5S", "Tablero semanal e histórico")}<main class="page page-with-nav"><section class="dashboard-hero"><div><p class="eyebrow">${selectedKey ? escapeHtml(weekLabel(selectedKey)) : "Sin resultados"}</p><h1>${snapshot ? `${snapshot.average}%` : "—"}</h1><p>${snapshot ? `${snapshot.areaCount} de ${AREAS.length} áreas con auditoría · Meta 80%` : "Completa auditorías para comenzar a medir"}</p><div class="dashboard-hero-actions"><button class="tour-launch" data-action="start-tour" ${state.audits.length ? "" : "disabled"}>▶ Iniciar Recorrido Visual 5S</button><button class="tour-launch secondary" data-action="start-tour-fullscreen" ${state.audits.length ? "" : "disabled"}>⛶ Presentar en pantalla completa</button></div></div><b>▥</b></section>
+    ${snapshots.length ? `<div class="week-strip">${weekSelector}</div>` : ""}
+    <div class="section-heading"><div><p class="eyebrow">Presentación</p><h2>Recorrido visual por las áreas</h2></div></div><p class="dashboard-help">El recorrido muestra resultado actual y semana anterior para identificar rápidamente si cada área subió, bajó o se mantuvo.</p>
     ${renderMasterQrCard()}
-    <div class="section-heading"><div><p class="eyebrow">Desempeño</p><h2>Último resultado por área</h2></div></div><div class="dashboard-list">${rows}</div></main>${bottomNav()}`;
+    <div class="section-heading"><div><p class="eyebrow">Tablero semanal</p><h2>Resultados por área</h2></div></div><div class="dashboard-list">${rows}</div></main>${bottomNav()}`;
   drawMasterQr();
 }
-
 function publicPhotoGroups() {
   const general = state.publicPhotos.filter((photo) => photo.kind === "general");
   const byQuestion = new Map();
@@ -851,20 +941,35 @@ function publicPhotoGroups() {
 }
 
 function publicHeader(detail = false) {
-  return `<header class="public-header"><div><img src="${MPS_LOGO_DATA_URI}" alt="Metal Plating y Servicios"><div><strong>${detail ? "Evidencias de Auditoría 5S" : "Resultados 5S MPS"}</strong><span>${detail ? "Consulta de resultados y oportunidades de mejora" : "Selecciona tu área para consultar la evaluación más reciente"}</span></div></div></header>`;
+  return `<header class="public-header"><div><img src="${MPS_LOGO_DATA_URI}" alt="Metal Plating y Servicios"><div><strong>${detail ? "Resultados y Evidencias 5S" : "Tablero de Resultados 5S"}</strong><span>${detail ? "Evidencias, recomendaciones y libro de trabajo" : "Resultados semanales por área · Meta 80%"}</span></div></div></header>`;
 }
 
 function renderPublicDirectory() {
-  const cards = AREAS.map((area) => {
+  const available = AREAS.map((area) => ({ area, published: state.publicAreas[area.id] })).filter((item) => item.published?.publicId && Number.isFinite(Number(item.published.result)));
+  const average = available.length ? Math.round(available.reduce((sum, item) => sum + Number(item.published.result), 0) / available.length) : 0;
+  const atGoal = available.filter((item) => Number(item.published.result) >= 80).length;
+  const critical = available.filter((item) => Number(item.published.result) <= 60).length;
+  const newest = available.map((item) => item.published.completedAt).filter(Boolean).sort().at(-1);
+  const currentWeek = newest ? weekKey(newest) : null;
+  const best = available.slice().sort((a,b) => Number(b.published.result)-Number(a.published.result))[0];
+  const rows = AREAS.map((area, index) => {
     const published = state.publicAreas[area.id];
-    if (!published?.publicId) {
-      return `<article class="public-area-card disabled"><div class="public-area-icon">${area.icon}</div><div><strong>${escapeHtml(area.short)}</strong><span>Sin evaluación publicada</span></div></article>`;
+    if (!published?.publicId || !Number.isFinite(Number(published.result))) {
+      return `<div class="public-board-row empty"><span>${index + 1}</span><div><strong>${escapeHtml(area.short)}</strong><small>Sin evaluación publicada</small></div><b>—</b><i>—</i></div>`;
     }
-    return `<a class="public-area-card" href="${escapeHtml(publicUrlFor(published.publicId))}"><div class="public-area-icon">${area.icon}</div><div><strong>${escapeHtml(area.short)}</strong><span>Ver resultado y evidencias</span></div><b>›</b></a>`;
+    const result = Number(published.result);
+    const level = boardLevel(result);
+    const delta = Number.isFinite(Number(published.previousResult)) ? result - Number(published.previousResult) : null;
+    const deltaText = delta == null ? "" : delta > 0 ? `↑ ${delta} pts` : delta < 0 ? `↓ ${Math.abs(delta)} pts` : "= sin cambio";
+    return `<a class="public-board-row ${level.tone}" href="${escapeHtml(publicUrlFor(published.publicId))}"><span>${index + 1}</span><div><strong>${escapeHtml(area.short)}</strong><small>${deltaText || "Ver evidencias y plan de mejora"}</small></div><b>${result}%</b><i>${level.light} ${level.label}</i><em>›</em></a>`;
   }).join("");
-  app.innerHTML = `${publicHeader(false)}<main class="public-page public-directory-page"><section class="directory-hero"><p class="eyebrow">Portal de retroalimentación</p><h1>Elige tu área</h1><p>Consulta la auditoría 5S más reciente, las fotografías que respaldan el resultado y las recomendaciones para mejorar. El porcentaje se mostrará al entrar al área.</p></section><div class="public-area-grid">${cards}</div><footer class="public-footer">Metal Plating y Servicios · Auditoría 5S</footer></main>`;
+  app.innerHTML = `${publicHeader(false)}<main class="public-page public-directory-page board-page">
+    <section class="public-board-hero"><div><p class="eyebrow">TABLERO DE RESULTADOS 5S POR ÁREA</p><h1>${currentWeek ? escapeHtml(weekLabel(currentWeek)) : "Resultados más recientes"}</h1><p>Selecciona cualquier área para consultar fotografías, comentarios, recomendaciones y su libro de trabajo 5S.</p></div><div class="goal-badge">★ META<br><strong>80%</strong></div></section>
+    <section class="board-summary"><article><span>Prom. planta</span><strong>${available.length ? `${average}%` : "—"}</strong></article><article><span>Áreas ≥80%</span><strong>${atGoal}</strong></article><article><span>Áreas críticas ≤60%</span><strong>${critical}</strong></article><article><span>Mejor área</span><strong>${best ? escapeHtml(best.area.short) : "—"}</strong></article></section>
+    <section class="public-board"><div class="public-board-head"><span>#</span><b>Área</b><b>% Cumpl.</b><b>Nivel</b></div>${rows}</section>
+    <section class="board-legend"><span>🟡 BUENO ≥75%</span><span>🟠 REGULAR 60–74%</span><span>🔴 DEFICIENTE &lt;60%</span><strong>Meta formal de cada área: 80%</strong></section>
+    <footer class="public-footer">ORDEN · LIMPIEZA · DISCIPLINA · ESTANDARIZACIÓN · MEJORA CONTINUA</footer></main>`;
 }
-
 function renderPublicPortal() {
   document.body.classList.add("public-mode");
   if (state.publicLoading) {
@@ -906,6 +1011,8 @@ function renderPublicPortal() {
     ${general.length || data.generalObservation ? `<div class="public-section-title"><p class="eyebrow">Vista general</p><h2>Condición del área</h2></div><section class="public-general-card">${data.generalObservation ? `<p>${escapeHtml(data.generalObservation)}</p>` : ""}${data.generalAnalysis ? `<div class="general-analysis-public"><strong>Análisis visual</strong><p>${escapeHtml(data.generalAnalysis)}</p></div>` : ""}${previousGeneral.length && general.length ? `<div class="visual-comparison"><article><div class="comparison-label"><span>Auditoría anterior</span><strong>${state.publicPreviousData?.result ?? data.previous?.result ?? "—"}%</strong></div><div class="public-photo-grid comparison">${previousGeneralPhotos}</div></article><article><div class="comparison-label"><span>Auditoría actual</span><strong>${data.result}%</strong></div><div class="public-photo-grid comparison">${generalPhotos}</div></article></div>` : generalPhotos ? `<div class="public-photo-grid general">${generalPhotos}</div>` : ""}</section>` : ""}
     <div class="public-section-title"><p class="eyebrow">Las 10 preguntas</p><h2>¿Cómo se obtuvo este resultado?</h2></div>
     <div class="public-evidence-list">${answerCards}</div>
+    <div class="public-section-title"><p class="eyebrow">Libro de trabajo 5S</p><h2>Tareas para mejorar la calificación</h2></div>
+    <section class="workbook-card">${renderPublicTasks()}</section>
     <section class="optional-improvement"><div><p class="eyebrow">Participación opcional</p><h2>¿Ya realizaron alguna mejora?</h2><p>Pueden compartir un comentario o fotografías. Esto no cambia la calificación y quedará pendiente de revisión por el SGC.</p></div><button class="secondary-button" data-action="toggle-improvement">${state.improvementOpen ? "Cerrar formulario" : "Agregar evidencia de mejora"}</button></section>
     ${state.improvementOpen ? `<section class="improvement-form"><label class="field-label" for="improvementComment">Comentario opcional</label><textarea id="improvementComment" maxlength="800" placeholder="Describe brevemente lo que mejoraron…">${escapeHtml(state.improvementComment)}</textarea><div class="photo-heading"><div><strong>Fotografías de mejora</strong><span>Hasta ${MAX_IMPROVEMENT_PHOTOS} fotos opcionales</span></div><span>${state.improvementPhotos.length}/${MAX_IMPROVEMENT_PHOTOS}</span></div>${renderPhotoGrid(state.improvementPhotos, "data-remove-improvement-photo", "add-improvement-photo", MAX_IMPROVEMENT_PHOTOS, "Evidencia de mejora")}<input id="improvementPhotoInput" class="hidden-input" type="file" accept="image/*" capture="environment" multiple><button class="primary-button full-button" data-action="submit-improvement" ${state.improvementStatus === "loading" ? "disabled" : ""}>${state.improvementStatus === "loading" ? "Enviando evidencia…" : "Enviar evidencia para revisión"}</button>${state.improvementStatus && state.improvementStatus !== "loading" ? `<div class="${state.improvementStatus === "success" ? "success-message" : "error-message"}">${state.improvementStatus === "success" ? "La evidencia se envió correctamente y quedó pendiente de revisión." : "No fue posible enviar la evidencia. Intenta nuevamente."}</div>` : ""}</section>` : ""}
     <footer class="public-footer">Metal Plating y Servicios · Auditoría 5S</footer>
@@ -915,6 +1022,39 @@ function renderPublicPortal() {
     document.getElementById("improvementComment").addEventListener("input", (event) => { state.improvementComment = event.target.value; });
     document.getElementById("improvementPhotoInput").addEventListener("change", (event) => addImprovementPhotos(event.target.files));
   }
+}
+
+function renderPublicTasks() {
+  const tasks = state.publicTasks || [];
+  if (!tasks.length) return `<div class="workbook-empty"><b>✓</b><div><strong>Sin tareas pendientes generadas</strong><p>Cuando existan oportunidades de mejora, aquí aparecerán acciones concretas para trabajar durante la semana.</p></div></div>`;
+  const done = tasks.filter((task) => task.done).length;
+  const items = tasks.map((task) => `<label class="workbook-task ${task.done ? "done" : ""}"><input type="checkbox" data-public-task="${escapeHtml(task.id)}" ${task.done ? "checked" : ""}><span class="task-check">✓</span><div><strong>${escapeHtml(task.action)}</strong><small>${escapeHtml(task.questionTitle || `Pregunta ${task.questionId}`)} · Calificación ${task.score}/5 → objetivo ${task.targetScore || Math.min(5, Number(task.score || 0) + 1)}/5</small></div></label>`).join("");
+  return `<div class="workbook-progress"><div><strong>${done} de ${tasks.length} realizadas</strong><span>Marca una tarea cuando el área la haya atendido. Es un apoyo de trabajo; no modifica la calificación vigente.</span></div><div class="workbook-progress-bar"><i style="width:${Math.round(done / tasks.length * 100)}%"></i></div></div><div class="workbook-list">${items}</div>`;
+}
+
+async function togglePublicTask(taskId, done) {
+  const task = state.publicTasks.find((item) => item.id === taskId);
+  if (!task || !cloudDb || !state.publicToken || !state.user) return;
+  task.done = done;
+  task.completedAt = done ? new Date().toISOString() : null;
+  render();
+  try {
+    await cloudDb.collection("publicAudits").doc(state.publicToken).collection("tasks").doc(taskId).update({
+      done,
+      completedAt: task.completedAt,
+      completedBy: state.user.uid
+    });
+  } catch (error) {
+    console.error("Actualización de tarea", error);
+    task.done = !done;
+    render();
+    alert("No fue posible actualizar la tarea. Intenta nuevamente.");
+  }
+}
+
+function previousAuditFor(audit) {
+  if (!audit?.area?.id) return null;
+  return state.audits.filter((item) => item.area.id === audit.area.id && item.id !== audit.id && new Date(item.completedAt || item.createdAt) < new Date(audit.completedAt || audit.createdAt)).sort(sortAudits)[0] || null;
 }
 
 function latestAuditsInAreaOrder() {
@@ -979,10 +1119,13 @@ function renderTour() {
   const recommendations = (audit.plan || []).filter((item) => Number(item.score) < 5).slice(0, 5).flatMap((item) => (item.actions || []).slice(0, 1).map((action) => `<li><strong>${escapeHtml(item.title)}:</strong> ${escapeHtml(action)}</li>`)).join("");
   const thumbStrip = photos.map((photo, index) => `<button class="tour-thumb ${index === state.tourPhotoIndex ? "active" : ""}" data-tour-photo="${index}"><img src="${photo.dataUrl}" alt="${escapeHtml(photo.label)}"><span>${escapeHtml(photo.label)}</span></button>`).join("");
   const level = resultLevel(audit.result);
+  const previousAudit = previousAuditFor(audit);
+  const scoreDelta = previousAudit ? Number(audit.result) - Number(previousAudit.result) : null;
+  const comparisonMarkup = previousAudit ? `<div class="tour-score-comparison"><div><span>Semana anterior</span><strong>${previousAudit.result}%</strong></div><div class="${scoreDelta > 0 ? "up" : scoreDelta < 0 ? "down" : "same"}"><span>Cambio</span><strong>${scoreDelta > 0 ? `↑ +${scoreDelta}` : scoreDelta < 0 ? `↓ ${scoreDelta}` : "= 0"} pts</strong></div></div>` : `<div class="tour-score-comparison"><div><span>Semana anterior</span><strong>Sin dato</strong></div></div>`;
   app.innerHTML = `<main class="tour-shell">
     <header class="tour-topbar"><div class="tour-brand"><img src="${MPS_LOGO_DATA_URI}" alt="MPS"><div><strong>Recorrido Visual 5S</strong><span>${state.tourIndex + 1} de ${audits.length} áreas con auditoría</span></div></div><div class="tour-top-actions"><button data-action="toggle-fullscreen">⛶ Pantalla completa</button><button data-action="close-tour">✕ Salir</button></div></header>
     <section class="tour-stage"><div class="tour-photo-stage">${currentPhoto ? `<img src="${currentPhoto.dataUrl}" alt="${escapeHtml(currentPhoto.label)}"><div class="tour-photo-caption"><span>${escapeHtml(currentPhoto.label)}</span><strong>${state.tourPhotoIndex + 1} / ${photos.length}</strong></div>` : `<div class="tour-no-photo"><b>▧</b><h2>Sin fotografías cargadas</h2><p>La auditoría sí puede presentarse con sus calificaciones y recomendaciones.</p></div>`}${photos.length > 1 ? `<button class="tour-photo-nav prev" data-action="tour-photo-prev">‹</button><button class="tour-photo-nav next" data-action="tour-photo-next">›</button>` : ""}</div>
-      <aside class="tour-summary"><span class="tour-area-counter">Área ${state.tourIndex + 1}</span><h1>${escapeHtml(audit.area.full)}</h1><div class="tour-score ${level.tone}"><strong>${audit.result}%</strong><span>${level.label}</span></div><p>${formatDate(audit.completedAt || audit.createdAt)} · ${escapeHtml(audit.auditor)}</p>${audit.generalObservation ? `<div class="tour-observation"><strong>Comentario general</strong><p>${escapeHtml(audit.generalObservation)}</p></div>` : ""}<div class="tour-recommendations"><strong>Sugerencias principales</strong>${recommendations ? `<ul>${recommendations}</ul>` : `<p>El área mantiene resultados sólidos. Continuar sosteniendo los estándares.</p>`}</div></aside>
+      <aside class="tour-summary"><span class="tour-area-counter">Área ${state.tourIndex + 1}</span><h1>${escapeHtml(audit.area.full)}</h1><div class="tour-score ${level.tone}"><strong>${audit.result}%</strong><span>Semana actual · ${level.label}</span></div>${comparisonMarkup}<p>${formatDate(audit.completedAt || audit.createdAt)} · ${escapeHtml(audit.auditor)}</p>${audit.generalObservation ? `<div class="tour-observation"><strong>Comentario general</strong><p>${escapeHtml(audit.generalObservation)}</p></div>` : ""}<div class="tour-recommendations"><strong>Sugerencias principales</strong>${recommendations ? `<ul>${recommendations}</ul>` : `<p>El área mantiene resultados sólidos. Continuar sosteniendo los estándares.</p>`}</div></aside>
     </section>
     ${photos.length ? `<div class="tour-thumbs">${thumbStrip}</div>` : ""}
     <section class="tour-questions"><div class="tour-section-title"><div><span>Evaluación completa</span><h2>Las 10 preguntas</h2></div><p>Calificación, observación y retroalimentación por criterio.</p></div><div class="tour-question-list">${questions}</div></section>
@@ -1339,12 +1482,15 @@ async function publishEvidence() {
       previous: previous ? { publicId: previous.publicId, result: previous.result, completedAt: previous.completedAt || previous.createdAt } : null,
       publishedAt: new Date().toISOString(),
       createdBy: state.user.uid,
-      version: "1.5"
+      version: "1.6"
     };
     await publicRef.set(publicDoc, { merge: true });
     await cloudDb.collection("publicAreas").doc(audit.area.id).set({
       areaId: audit.area.id,
       publicId,
+      result: Number(audit.result),
+      previousResult: previous ? Number(previous.result) : null,
+      weekKey: weekKey(publicDoc.completedAt),
       completedAt: publicDoc.completedAt,
       updatedAt: publicDoc.publishedAt
     }, { merge: true });
@@ -1357,6 +1503,26 @@ async function publishEvidence() {
     for (let i = 0; i < photos.length; i += 8) {
       await Promise.all(photos.slice(i, i + 8).map(({ photo, kind, questionId, order }) => publicRef.collection("photos").doc(photo.id).set({ id: photo.id, kind, questionId, order, dataUrl: photo.dataUrl, createdAt: photo.createdAt || new Date().toISOString() }, { merge: true })));
     }
+
+    const workbookTasks = [];
+    for (const item of (audit.plan || []).filter((planItem) => Number(planItem.score) < 5)) {
+      (item.actions || []).slice(0, 3).forEach((action, actionIndex) => workbookTasks.push({
+        id: `q${item.questionId}-a${actionIndex + 1}`,
+        questionId: Number(item.questionId),
+        questionTitle: item.title,
+        score: Number(item.score),
+        targetScore: Math.min(5, Number(item.score) + 1),
+        action,
+        order: Number(item.questionId) * 10 + actionIndex,
+        sourceAuditId: audit.id
+      }));
+    }
+    await Promise.all(workbookTasks.map(async (task) => {
+      const taskRef = publicRef.collection("tasks").doc(task.id);
+      const current = await taskRef.get();
+      if (current.exists) return taskRef.set({ ...task, updatedAt: new Date().toISOString() }, { merge: true });
+      return taskRef.set({ ...task, done: false, completedAt: null, completedBy: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    }));
 
     audit = { ...audit, publicId, publicUrl, publishedAt: publicDoc.publishedAt };
     await cloudDb.collection("audits").doc(audit.id).set({ publicId, publicUrl, publishedAt: publicDoc.publishedAt }, { merge: true });
@@ -1544,6 +1710,8 @@ function editPlanItem(questionId) {
 
 app.addEventListener("click", async (event) => {
   if (state.publicMode) {
+    const publicTask = event.target.closest("[data-public-task]");
+    if (publicTask) { await togglePublicTask(publicTask.dataset.publicTask, publicTask.checked); return; }
     const removeImprovement = event.target.closest("[data-remove-improvement-photo]");
     if (removeImprovement) {
       state.improvementPhotos = state.improvementPhotos.filter((photo) => photo.id !== removeImprovement.dataset.removeImprovementPhoto);
@@ -1572,6 +1740,8 @@ app.addEventListener("click", async (event) => {
     return;
   }
 
+  const weekButton = event.target.closest("[data-week]");
+  if (weekButton) { state.dashboardWeekKey = weekButton.dataset.week; state.view = "dashboard"; state.selectedAudit = null; render(); return; }
   const areaButton = event.target.closest("[data-area]");
   if (areaButton) return startAudit(areaButton.dataset.area);
   const scoreButton = event.target.closest("[data-score]");

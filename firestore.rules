@@ -1,15 +1,11 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-
-    // Aplicación interna: usa una sesión anónima de Firebase.
     match /audits/{auditId} {
       allow read: if request.auth != null;
-      allow create: if request.auth != null
-                    && request.resource.data.createdBy == request.auth.uid;
+      allow create: if request.auth != null && request.resource.data.createdBy == request.auth.uid;
       allow update: if request.auth != null;
       allow delete: if false;
-
       match /photos/{photoId} {
         allow read: if request.auth != null;
         allow create, update: if request.auth != null;
@@ -17,8 +13,6 @@ service cloud.firestore {
       }
     }
 
-    // Directorio público del QR general. Cada documento corresponde a un área
-    // conocida por la app y apunta únicamente a su auditoría publicada más reciente.
     match /publicAreas/{areaId} {
       allow get: if true;
       allow list: if false;
@@ -26,8 +20,6 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Portal generado por QR. Solo permite obtener un documento cuando se conoce
-    // su identificador aleatorio; no permite listar todas las auditorías públicas.
     match /publicAudits/{publicId} {
       allow get: if true;
       allow list: if false;
@@ -40,18 +32,27 @@ service cloud.firestore {
         allow delete: if false;
       }
 
-      // Evidencia opcional compartida por el área.
+      // Libro de trabajo 5S: cualquier visitante del QR usa una sesión anónima.
+      // Solo puede cambiar el estado de ejecución; no puede modificar el texto de la tarea.
+      match /tasks/{taskId} {
+        allow get, list: if true;
+        allow create: if request.auth != null;
+        allow update: if request.auth != null
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['done', 'completedAt', 'completedBy']);
+        allow delete: if false;
+      }
+
       match /improvements/{improvementId} {
         allow read: if request.auth != null;
         allow create: if request.auth != null
-                      && request.resource.data.publicId == publicId
-                      && request.resource.data.comment is string
-                      && request.resource.data.comment.size() <= 800
-                      && request.resource.data.photoCount is int
-                      && request.resource.data.photoCount >= 0
-                      && request.resource.data.photoCount <= 3;
+          && request.resource.data.publicId == publicId
+          && request.resource.data.comment is string
+          && request.resource.data.comment.size() <= 800
+          && request.resource.data.photoCount is int
+          && request.resource.data.photoCount >= 0
+          && request.resource.data.photoCount <= 3;
         allow update, delete: if false;
-
         match /photos/{photoId} {
           allow read: if request.auth != null;
           allow create: if request.auth != null;
