@@ -238,6 +238,7 @@ const state = {
   audits: [],
   draft: null,
   pendingDraft: null,
+  editingAuditId: null,
   summary: false,
   currentPlan: null,
   selectedAudit: null,
@@ -494,7 +495,8 @@ async function initPublicPortal() {
     ]);
     if (!auditDoc.exists) throw new Error("No se encontró la auditoría asociada con este enlace.");
     state.publicData = { id: auditDoc.id, ...auditDoc.data() };
-    state.publicPhotos = photoSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    const activePhotoIds = new Set(state.publicData.photoIds || []);
+    state.publicPhotos = photoSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })).filter((photo) => !activePhotoIds.size || activePhotoIds.has(photo.id));
     try {
       const taskSnapshot = await ref.collection("tasks").orderBy("order", "asc").get();
       const cloudTasks = taskSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
@@ -513,7 +515,8 @@ async function initPublicPortal() {
         ]);
         if (previousDoc.exists) {
           state.publicPreviousData = { id: previousDoc.id, ...previousDoc.data() };
-          state.publicPreviousPhotos = previousPhotoSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+          const previousActiveIds = new Set(state.publicPreviousData.photoIds || []);
+          state.publicPreviousPhotos = previousPhotoSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })).filter((photo) => !previousActiveIds.size || previousActiveIds.has(photo.id));
         }
       } catch (previousError) {
         console.warn("No se pudo cargar la auditoría anterior", previousError);
@@ -596,6 +599,8 @@ function normalizeDraft(draft) {
   draft.generalObservation = draft.generalObservation || "";
   draft.generalAnalysis = draft.generalAnalysis || "";
   draft.stage = draft.stage || "questions";
+  draft.index = Math.max(0, Math.min(Number.isFinite(Number(draft.index)) ? Number(draft.index) : 0, QUESTIONS.length - 1));
+  draft.lastSavedAt = draft.lastSavedAt || draft.updatedAt || draft.createdAt || new Date().toISOString();
   return draft;
 }
 
@@ -780,7 +785,7 @@ function renderHome() {
       <section class="sync-card ${state.cloudStatus}"><b>${cloudIcon}</b><div><strong>${escapeHtml(cloudText)}</strong><span>${state.user ? "Acceso anónimo activo. Los resultados se sincronizan entre dispositivos." : state.authError ? escapeHtml(state.authError) : "Configura Firebase para compartir resultados."}</span></div></section>
       <label class="field-label" for="auditor">Nombre del auditor</label>
       <input id="auditor" class="text-input" value="${escapeHtml(state.auditor)}" placeholder="Ej. Nombre de la auditora">
-      ${state.pendingDraft ? `<button class="resume-card" data-action="resume"><div><strong>Continuar auditoría pendiente</strong><span>${escapeHtml(state.pendingDraft.value.area.full)} · ${state.pendingDraft.value.stage === "general" ? "Evidencia general" : `Pregunta ${state.pendingDraft.value.index + 1} de 10`}</span></div><b>›</b></button>` : ""}
+      ${state.pendingDraft ? `<button class="resume-card" data-action="resume"><div><strong>${state.pendingDraft.value.editingExisting ? "Continuar corrección pendiente" : "Continuar auditoría pendiente"}</strong><span>${escapeHtml(state.pendingDraft.value.area.full)} · ${state.pendingDraft.value.stage === "summary" ? "Resultado final" : state.pendingDraft.value.stage === "general" ? "Evidencia general" : `Pregunta ${state.pendingDraft.value.index + 1} de 10`} · Guardado automático</span></div><b>›</b></button>` : ""}
       <div class="section-heading"><div><p class="eyebrow">11 áreas configuradas</p><h2>¿Qué área vas a auditar?</h2></div></div>
       <div class="area-grid">${cards}</div>
       ${state.auditor.trim() ? "" : `<p class="helper-message">Escribe el nombre del auditor para habilitar las áreas.</p>`}
@@ -794,8 +799,10 @@ function renderHome() {
 }
 
 function renderPhotoGrid(photos, removeAttribute, addAction, max, label) {
-  const thumbs = (photos || []).map((photo) => `<div class="photo-thumb"><img src="${photo.dataUrl}" alt="${escapeHtml(label)}"><button ${removeAttribute}="${photo.id}" aria-label="Eliminar foto">×</button></div>`).join("");
-  const add = photos.length < max ? `<button class="add-photo" data-action="${addAction}"><b>＋</b><span>Tomar o elegir foto</span></button>` : "";
+  const replaceAttribute = removeAttribute.replace("remove", "replace");
+  const allowReplace = removeAttribute === "data-remove-photo" || removeAttribute === "data-remove-general-photo";
+  const thumbs = (photos || []).map((photo) => `<div class="photo-thumb"><img src="${photo.dataUrl}" alt="${escapeHtml(label)}"><div class="photo-thumb-actions">${allowReplace ? `<button class="replace-photo-button" ${replaceAttribute}="${photo.id}" aria-label="Reemplazar foto" title="Reemplazar foto">↻</button>` : ""}<button class="remove-photo-button" ${removeAttribute}="${photo.id}" aria-label="Eliminar foto" title="Eliminar foto">×</button></div>${allowReplace ? `<span class="photo-edit-hint">Reemplazar / eliminar</span>` : ""}</div>`).join("");
+  const add = (photos || []).length < max ? `<button class="add-photo" data-action="${addAction}"><b>＋</b><span>Tomar o elegir foto</span></button>` : "";
   return `<div class="photo-grid">${thumbs}${add}</div>`;
 }
 
@@ -948,6 +955,8 @@ function renderDetail() {
   const generalPhotos = (audit.generalPhotos || []).map((photo) => photo.dataUrl ? `<img src="${photo.dataUrl}" alt="Vista general del área">` : `<div class="evidence-placeholder">Cargando vista general…</div>`).join("");
   const improvements = (audit.improvements || []).map((item) => `<article class="improvement-card"><div><span class="status-pill">Pendiente de revisión</span><strong>${formatDate(item.createdAt)}</strong></div><p>${escapeHtml(item.comment || "Evidencia fotográfica compartida por el área")}</p>${item.photos?.length ? `<div class="evidence-grid">${item.photos.map((photo) => `<img src="${photo.dataUrl}" alt="Evidencia de mejora">`).join("")}</div>` : ""}</article>`).join("");
   app.innerHTML = `${header("Detalle de auditoría", audit.area.short, true)}<main class="page detail-page"><section class="detail-header"><div><p class="eyebrow">Resultado semanal</p><h1>${audit.result}%</h1><p>${escapeHtml(audit.area.full)}</p></div><div class="detail-meta"><span>Auditor</span><strong>${escapeHtml(audit.auditor)}</strong><span>Fecha</span><strong>${formatDate(audit.completedAt || audit.createdAt)}</strong></div></section>
+    <section class="edit-audit-bar"><div><strong>¿Necesitas corregir algo?</strong><span>Puedes cambiar una calificación, comentario o fotografía sin crear otra auditoría.</span></div><button class="secondary-button" data-action="edit-audit">✎ Editar auditoría</button></section>
+    ${audit.needsRepublish ? `<section class="republish-warning"><div><strong>Cambios pendientes en el portal QR</strong><span>La auditoría fue corregida. Actualiza la publicación para que responsables vean la versión nueva.</span></div><button class="primary-button inline-button" data-action="publish-evidence">Actualizar portal QR</button></section>` : ""}
     ${renderQrCard(audit)}
     ${audit.generalPhotos?.length || audit.generalObservation ? `<div class="section-heading"><div><p class="eyebrow">Vista general</p><h2>Condición global del área</h2></div></div><article class="evidence-card"><p>${escapeHtml(audit.generalObservation || "Sin comentario general")}</p>${audit.generalAnalysis ? `<p><strong>Análisis visual:</strong> ${escapeHtml(audit.generalAnalysis)}</p>` : ""}<div class="evidence-grid general-grid">${generalPhotos}</div></article>` : ""}
     ${evidenceAnswers.length ? `<div class="section-heading"><div><p class="eyebrow">Evidencia por criterio</p><h2>Por qué se obtuvo el resultado</h2></div></div><div class="evidence-list">${evidenceAnswers.map(evidenceCard).join("")}</div>` : ""}
@@ -1264,6 +1273,7 @@ function render() {
   document.body.classList.remove("public-mode", "tour-active");
   if (state.loading || !state.authReady) return;
   if (state.selectedAudit) return renderDetail();
+  if (state.draft?.stage === "summary") { state.summary = true; return renderSummary(); }
   if (state.draft && state.summary) return renderSummary();
   if (state.draft?.stage === "general") return renderGeneralEvidence();
   if (state.draft) return renderWizard();
@@ -1273,11 +1283,19 @@ function render() {
 }
 
 async function saveCurrentDraft() {
-  if (state.draft) await idbPut("settings", { key: "draft", value: state.draft });
+  if (!state.draft) return;
+  state.draft.lastSavedAt = new Date().toISOString();
+  await idbPut("settings", { key: "draft", value: state.draft });
 }
 
 async function startAudit(areaId) {
   const area = AREAS.find((item) => item.id === areaId);
+  if (state.pendingDraft?.value && state.pendingDraft.value.id !== state.draft?.id) {
+    const ok = confirm(`Hay una auditoría pendiente de ${state.pendingDraft.value.area?.short || "otra área"}. Si inicias una nueva se reemplazará ese borrador. ¿Deseas continuar?`);
+    if (!ok) return;
+  }
+  state.editingAuditId = null;
+  state.pendingDraft = null;
   state.draft = normalizeDraft({ id: uid(), area, auditor: state.auditor.trim(), createdAt: new Date().toISOString(), index: 0, stage: "questions", answers: emptyAnswers(), generalPhotos: [], generalObservation: "", generalAnalysis: "" });
   state.currentPlan = null;
   state.summary = false;
@@ -1346,6 +1364,36 @@ async function addQuestionPhotos(fileList) {
 
 async function addGeneralPhotos(fileList) {
   return appendPhotos(state.draft.generalPhotos, fileList, MAX_GENERAL_PHOTOS);
+}
+
+async function replaceDraftPhoto(kind, photoId) {
+  if (!state.draft) return;
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/*";
+  input.setAttribute("capture", "environment");
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    app.classList.add("busy");
+    try {
+      const dataUrl = await resizeImage(file);
+      let target = null;
+      if (kind === "question") target = state.draft.answers[state.draft.index]?.photos?.find((photo) => photo.id === photoId);
+      if (kind === "general") target = state.draft.generalPhotos?.find((photo) => photo.id === photoId);
+      if (!target) return;
+      target.name = file.name || target.name || "evidencia.jpg";
+      target.dataUrl = dataUrl;
+      target.replacedAt = new Date().toISOString();
+      await saveCurrentDraft();
+      render();
+    } catch (error) {
+      alert(`No fue posible reemplazar la fotografía: ${error.message}`);
+    } finally {
+      app.classList.remove("busy");
+    }
+  };
+  input.click();
 }
 
 async function addImprovementPhotos(fileList) {
@@ -1467,16 +1515,22 @@ async function saveAuditToCloud(audit) {
 }
 
 async function saveAudit() {
+  const wasEditing = Boolean(state.draft?.editingExisting || state.editingAuditId);
+  const wasPublished = Boolean(state.draft?.publicId);
   const result = calculateResult(state.draft.answers);
   const audit = {
     ...state.draft,
     result,
     plan: state.currentPlan || buildPlan(state.draft.answers, state.draft.aiSuggestions || []),
-    completedAt: new Date().toISOString(),
+    completedAt: wasEditing ? (state.draft.completedAt || state.draft.createdAt || new Date().toISOString()) : new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    needsRepublish: wasEditing && wasPublished,
     syncStatus: state.cloudEnabled ? "pending" : "local"
   };
   delete audit.index;
   delete audit.stage;
+  delete audit.editingExisting;
+  delete audit.lastSavedAt;
   await idbPut("audits", audit);
   await idbDelete("settings", "draft");
   state.audits = [audit, ...state.audits.filter((item) => item.id !== audit.id)].sort(sortAudits);
@@ -1500,12 +1554,23 @@ async function saveAudit() {
 
   state.selectedAudit = audit;
   state.draft = null;
+  state.editingAuditId = null;
   state.summary = false;
   state.currentPlan = null;
   state.view = "history";
   state.pendingDraft = null;
   state.aiStatus = "idle";
+  if (wasEditing && wasPublished && state.cloudEnabled && state.user && navigator.onLine) {
+    try {
+      await publishEvidence({ silent: true });
+      audit = state.selectedAudit || audit;
+    } catch (error) {
+      console.warn("No se pudo actualizar automáticamente el portal público", error);
+      audit.needsRepublish = true;
+    }
+  }
   await loadPublicImprovements(audit);
+  state.selectedAudit = audit;
   render();
 }
 
@@ -1553,6 +1618,29 @@ async function loadPublicImprovements(audit) {
   }
 }
 
+async function editSelectedAudit() {
+  if (!state.selectedAudit) return;
+  let audit = await loadCloudPhotos(state.selectedAudit);
+  const copy = JSON.parse(JSON.stringify(audit));
+  state.editingAuditId = audit.id;
+  state.draft = normalizeDraft({
+    ...copy,
+    editingExisting: true,
+    index: 0,
+    stage: "questions",
+    completedAt: audit.completedAt || audit.createdAt,
+    updatedAt: new Date().toISOString()
+  });
+  state.pendingDraft = { key: "draft", value: state.draft };
+  state.currentPlan = null;
+  state.summary = false;
+  state.selectedAudit = null;
+  state.aiStatus = state.draft.aiAnalyzedAt ? "success" : "idle";
+  state.aiMessage = "";
+  await saveCurrentDraft();
+  render();
+}
+
 async function selectAudit(id) {
   let audit = state.audits.find((item) => item.id === id);
   if (!audit) return;
@@ -1565,13 +1653,14 @@ async function selectAudit(id) {
   render();
 }
 
-async function publishEvidence() {
+async function publishEvidence(options = {}) {
+  const silent = Boolean(options.silent);
   if (!cloudDb || !state.user || !state.selectedAudit) {
     alert("Se necesita conexión con Firebase para generar el portal público de evidencias.");
     return;
   }
   state.publishStatus = "loading";
-  render();
+  if (!silent) render();
   try {
     let audit = await loadCloudPhotos(state.selectedAudit);
     const publicId = audit.publicId || publicUid();
@@ -1607,9 +1696,8 @@ async function publishEvidence() {
       previous: previous ? { publicId: previous.publicId, result: previous.result, completedAt: previous.completedAt || previous.createdAt } : null,
       publishedAt: new Date().toISOString(),
       createdBy: state.user.uid,
-      version: "1.6.1"
+      version: "1.6.2"
     };
-    await publicRef.set(publicDoc, { merge: true });
     await cloudDb.collection("publicAreas").doc(audit.area.id).set({
       areaId: audit.area.id,
       publicId,
@@ -1625,6 +1713,8 @@ async function publishEvidence() {
       for (let index = 0; index < (answer.photos || []).length; index++) photos.push({ photo: answer.photos[index], kind: "question", questionId: answer.questionId, order: answer.questionId * 100 + index });
     }
     for (let index = 0; index < (audit.generalPhotos || []).length; index++) photos.push({ photo: audit.generalPhotos[index], kind: "general", questionId: null, order: index });
+    publicDoc.photoIds = photos.map(({ photo }) => photo.id);
+    await publicRef.set(publicDoc, { merge: true });
     for (let i = 0; i < photos.length; i += 8) {
       await Promise.all(photos.slice(i, i + 8).map(({ photo, kind, questionId, order }) => publicRef.collection("photos").doc(photo.id).set({ id: photo.id, kind, questionId, order, dataUrl: photo.dataUrl, createdAt: photo.createdAt || new Date().toISOString() }, { merge: true })));
     }
@@ -1638,8 +1728,8 @@ async function publishEvidence() {
       return taskRef.set({ ...taskData, done: false, completedAt: null, completedBy: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     }));
 
-    audit = { ...audit, publicId, publicUrl, publishedAt: publicDoc.publishedAt };
-    await cloudDb.collection("audits").doc(audit.id).set({ publicId, publicUrl, publishedAt: publicDoc.publishedAt }, { merge: true });
+    audit = { ...audit, publicId, publicUrl, publishedAt: publicDoc.publishedAt, needsRepublish: false };
+    await cloudDb.collection("audits").doc(audit.id).set({ publicId, publicUrl, publishedAt: publicDoc.publishedAt, needsRepublish: false }, { merge: true });
     await idbPut("audits", audit);
     state.audits = state.audits.map((item) => item.id === audit.id ? audit : item);
     state.selectedAudit = audit;
@@ -1648,7 +1738,7 @@ async function publishEvidence() {
     console.error("Publicación de evidencias", error);
     state.publishStatus = "error";
   }
-  render();
+  if (!silent) render();
 }
 
 function drawCurrentQr() {
@@ -1863,6 +1953,10 @@ app.addEventListener("click", async (event) => {
     state.draft.answers[state.draft.index].score = Number(scoreButton.dataset.score);
     await saveCurrentDraft(); render(); return;
   }
+  const replacePhoto = event.target.closest("[data-replace-photo]");
+  if (replacePhoto) return replaceDraftPhoto("question", replacePhoto.dataset.replacePhoto);
+  const replaceGeneral = event.target.closest("[data-replace-general-photo]");
+  if (replaceGeneral) return replaceDraftPhoto("general", replaceGeneral.dataset.replaceGeneralPhoto);
   const removePhoto = event.target.closest("[data-remove-photo]");
   if (removePhoto) {
     const answer = state.draft.answers[state.draft.index];
@@ -1898,6 +1992,7 @@ app.addEventListener("click", async (event) => {
   }
   if (action === "skip-general" || action === "finish-general") {
     state.summary = true;
+    state.draft.stage = "summary";
     state.currentPlan = buildPlan(state.draft.answers, state.draft.aiSuggestions || []);
     state.aiStatus = state.draft.aiAnalyzedAt ? "success" : "idle";
     await saveCurrentDraft(); render(); return;
@@ -1905,8 +2000,9 @@ app.addEventListener("click", async (event) => {
   if (action === "save-exit") {
     await saveCurrentDraft(); state.pendingDraft = { key: "draft", value: state.draft }; state.draft = null; state.view = "home"; render(); return;
   }
-  if (action === "resume") { state.draft = normalizeDraft(state.pendingDraft.value); state.summary = false; state.currentPlan = null; render(); return; }
-  if (action === "review") { state.summary = false; state.draft.stage = "questions"; state.draft.index = QUESTIONS.length - 1; render(); return; }
+  if (action === "resume") { state.draft = normalizeDraft(state.pendingDraft.value); state.editingAuditId = state.draft.editingExisting ? state.draft.id : null; state.summary = state.draft.stage === "summary"; state.currentPlan = state.summary ? buildPlan(state.draft.answers, state.draft.aiSuggestions || []) : null; render(); return; }
+  if (action === "edit-audit") { await editSelectedAudit(); return; }
+  if (action === "review") { state.summary = false; state.draft.stage = "questions"; state.draft.index = QUESTIONS.length - 1; await saveCurrentDraft(); render(); return; }
   if (action === "save-audit") return saveAudit();
   if (action === "analyze-ai") return analyzeWithAI(false);
   if (action === "export") return exportExcel();
@@ -1920,12 +2016,24 @@ app.addEventListener("click", async (event) => {
   if (action === "download-master-qr") return downloadMasterQr();
   if (action === "back") {
     if (state.selectedAudit) state.selectedAudit = null;
-    else if (state.summary) { state.summary = false; state.draft.stage = "general"; }
-    else if (state.draft?.stage === "general") { state.draft.stage = "questions"; state.draft.index = QUESTIONS.length - 1; }
-    else if (state.draft && state.draft.index > 0) state.draft.index -= 1;
+    else if (state.summary) { state.summary = false; state.draft.stage = "general"; await saveCurrentDraft(); }
+    else if (state.draft?.stage === "general") { state.draft.stage = "questions"; state.draft.index = QUESTIONS.length - 1; await saveCurrentDraft(); }
+    else if (state.draft && state.draft.index > 0) { state.draft.index -= 1; await saveCurrentDraft(); }
     else if (state.draft) { await saveCurrentDraft(); state.pendingDraft = { key: "draft", value: state.draft }; state.draft = null; }
     render();
   }
+});
+
+// Guardado de seguridad: además de cada cambio, conserva periódicamente la posición actual.
+setInterval(() => {
+  if (!state.publicMode && state.draft) saveCurrentDraft().catch((error) => console.warn("Autoguardado", error));
+}, 4000);
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && !state.publicMode && state.draft) saveCurrentDraft().catch(() => {});
+});
+window.addEventListener("pagehide", () => {
+  if (!state.publicMode && state.draft) saveCurrentDraft().catch(() => {});
 });
 
 window.addEventListener("online", () => {
